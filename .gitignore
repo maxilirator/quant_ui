@@ -1,0 +1,19 @@
+# Node artifacts
+frontend/node_modules/
+frontend/.svelte-kit/
+frontend/.vite/
+
+# Python virtual environments
+.venv/
+backend/.venv/
+**/__pycache__/
+*.pyc
+
+# Env files
+.env
+frontend/.env
+backend/.env
+
+# OS files
+.DS_Store
+Thumbs.db
