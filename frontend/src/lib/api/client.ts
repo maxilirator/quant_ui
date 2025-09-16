@@ -1,20 +1,14 @@
 import type {
   AggregateMetrics,
-  BacktestRequest,
-  BacktestResponse,
-  BrokerPosition,
   FeatureCatalogResponse,
   HealthResponse,
-  JobListResponse,
-  JobLogResponse,
-  JobStatus,
-  OrderRequest,
-  OrderResponse,
   PrimitiveCatalogResponse,
   StrategyListResponse,
   StrategySummary,
-  TrainJobRequest
+  EquityCurve,
+  DailyReturns
 } from './types';
+import type { CatalogManifest } from './types';
 
 const API_BASE_PATH = '/api';
 
@@ -67,38 +61,6 @@ export async function getAggregateMetrics(fetcher: typeof fetch): Promise<Aggreg
   return request(fetcher, '/metrics/aggregate');
 }
 
-export async function launchBacktest(
-  fetcher: typeof fetch,
-  payload: BacktestRequest
-): Promise<BacktestResponse> {
-  return request(fetcher, '/backtest', {
-    method: 'POST',
-    body: JSON.stringify(payload)
-  });
-}
-
-export async function launchTrainingJob(
-  fetcher: typeof fetch,
-  payload: TrainJobRequest
-): Promise<JobStatus> {
-  return request(fetcher, '/jobs/train', {
-    method: 'POST',
-    body: JSON.stringify(payload)
-  });
-}
-
-export async function getJobs(fetcher: typeof fetch): Promise<JobListResponse> {
-  return request(fetcher, '/jobs');
-}
-
-export async function getJob(fetcher: typeof fetch, jobId: string): Promise<JobStatus> {
-  return request(fetcher, `/jobs/${jobId}`);
-}
-
-export async function getJobLog(fetcher: typeof fetch, jobId: string): Promise<JobLogResponse> {
-  return request(fetcher, `/jobs/${jobId}/log`);
-}
-
 export async function getFeatureCatalog(fetcher: typeof fetch): Promise<FeatureCatalogResponse> {
   return request(fetcher, '/config/features');
 }
@@ -107,13 +69,80 @@ export async function getPrimitiveCatalog(fetcher: typeof fetch): Promise<Primit
   return request(fetcher, '/config/primitives');
 }
 
-export async function listBrokerPositions(fetcher: typeof fetch): Promise<BrokerPosition[]> {
-  return request(fetcher, '/broker/positions');
+// ---- New read-only additions ----
+
+export async function getEquityCurve(fetcher: typeof fetch, exprHash: string): Promise<EquityCurve> {
+  return request(fetcher, `/strategies/${exprHash}/curve`);
 }
 
-export async function placeOrder(fetcher: typeof fetch, order: OrderRequest): Promise<OrderResponse> {
-  return request(fetcher, '/broker/orders', {
-    method: 'POST',
-    body: JSON.stringify(order)
-  });
+export async function getDailyReturns(fetcher: typeof fetch, exprHash: string): Promise<DailyReturns> {
+  return request(fetcher, `/strategies/${exprHash}/returns`);
 }
+
+export interface PanelSliceParams {
+  start?: string;
+  end?: string;
+  tickers?: string[];
+  limit_tickers?: number;
+}
+
+export interface PanelSliceResponse {
+  rows: Array<Record<string, unknown>>;
+  columns: string[];
+  total_rows: number;
+  downsampled: boolean;
+}
+
+export async function getPanelSlice(fetcher: typeof fetch, params: PanelSliceParams = {}): Promise<PanelSliceResponse> {
+  const search = new URLSearchParams();
+  if (params.start) search.set('start', params.start);
+  if (params.end) search.set('end', params.end);
+  if (params.tickers && params.tickers.length) search.set('tickers', params.tickers.join(','));
+  if (params.limit_tickers !== undefined) search.set('limit_tickers', String(params.limit_tickers));
+  const qs = search.toString();
+  return request(fetcher, `/panel/slice${qs ? `?${qs}` : ''}`);
+}
+
+// Artifacts manifest & filtered lists
+export interface ArtifactEntry { file: string; sha256: string; size: number; created: string; kind: string; }
+export interface ArtifactManifest { generated_at: string; git_commit?: string | null; data_version?: string | null; entries: ArtifactEntry[]; version: number; }
+
+export async function getArtifactManifest(fetcher: typeof fetch): Promise<ArtifactManifest> {
+  return request(fetcher, '/artifacts/manifest');
+}
+
+export async function listModelArtifacts(fetcher: typeof fetch): Promise<ArtifactEntry[]> {
+  const r = await request<{ models: ArtifactEntry[] }>(fetcher, '/artifacts/models');
+  return r.models;
+}
+
+export async function listReportArtifacts(fetcher: typeof fetch): Promise<ArtifactEntry[]> {
+  const r = await request<{ reports: ArtifactEntry[] }>(fetcher, '/artifacts/reports');
+  return r.reports;
+}
+
+export async function listSignalArtifacts(fetcher: typeof fetch): Promise<ArtifactEntry[]> {
+  const r = await request<{ signals: ArtifactEntry[] }>(fetcher, '/artifacts/signals');
+  return r.signals;
+}
+
+export async function listLogArtifacts(fetcher: typeof fetch): Promise<ArtifactEntry[]> {
+  const r = await request<{ logs: ArtifactEntry[] }>(fetcher, '/artifacts/logs');
+  return r.logs;
+}
+
+export async function listDatasetArtifacts(fetcher: typeof fetch): Promise<ArtifactEntry[]> {
+  const r = await request<{ datasets: ArtifactEntry[] }>(fetcher, '/artifacts/datasets');
+  return r.datasets;
+}
+
+export async function listStrategyArtifacts(fetcher: typeof fetch): Promise<ArtifactEntry[]> {
+  const r = await request<{ strategies: ArtifactEntry[] }>(fetcher, '/artifacts/strategies');
+  return r.strategies;
+}
+
+// Catalog aggregation (optional backend endpoint e.g. /catalog/manifest)
+export async function getCatalogManifest(fetcher: typeof fetch): Promise<CatalogManifest> {
+  return request(fetcher, '/catalog/manifest');
+}
+

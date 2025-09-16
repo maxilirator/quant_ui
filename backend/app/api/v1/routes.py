@@ -1,39 +1,66 @@
-"""Version 1 API routes."""
+"""Version 1 API routes (UI adapter mode).
+
+This service is a thin read-only facade over an external quant engine
+mounted via QUANT_CORE_ROOT (see `engine_adapter`). Strategy & feature
+data are sourced from external artifacts (manifest / runs DB) when
+available; otherwise a small in-memory fallback sample is returned.
+
+Mutation endpoints from the earlier prototype (training/backtest/jobs)
+now return HTTP 501 to signal that they are intentionally disabled in
+the UI-only deployment profile.
+"""
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket
 
+UTC = timezone.utc
+
 from app.core.config import Settings, get_settings
 
 from .schemas import (
     AggregateMetrics,
-    BacktestRequest,
-    BacktestResponse,
-    BrokerPosition,
     DailyReturns,
     EquityCurve,
     FeatureCatalogResponse,
     FeatureDefinition,
     HealthResponse,
-    JobListResponse,
-    JobLogEntry,
-    JobLogResponse,
-    JobStatus,
-    OrderRequest,
-    OrderResponse,
     PrimitiveCatalogResponse,
     PrimitiveDefinition,
+    CatalogManifest,
+    CatalogArtifactCounts,
+    CatalogStrategyTagStat,
+    CatalogDatasetEntry,
     StrategyDetail,
     StrategyListResponse,
     StrategyMetrics,
     StrategySummary,
-    TrainJobRequest,
 )
+
+from app.engine_adapter import (
+    adapter_available,
+    fetch_equity_curve,
+    fetch_feature_catalog,
+    fetch_primitive_catalog,
+    fetch_strategy_detail,
+    fetch_strategies,
+)
+from app.providers.json_provider import (
+    load_feature_catalog as json_feature_catalog,
+    load_primitive_catalog as json_primitive_catalog,
+    load_strategies as json_list_strategies,
+    load_strategy_detail as json_strategy_detail,
+    load_equity_curve as json_equity_curve,
+    load_daily_returns as json_daily_returns,
+)
+from .panel import load_panel_slice
+from app.artifacts.manifest import load_manifest
+from pathlib import Path
+from collections import Counter
 
 router = APIRouter()
 
@@ -46,8 +73,10 @@ NOW = datetime.now(UTC)
 SAMPLE_STRATEGIES: dict[str, StrategyDetail] = {
     "abc123": StrategyDetail(
         expr_hash="abc123",
-        expr="clip(feat(\"c_sek\")/lag(feat(\"c_sek\"),1)-1)",
-        metrics=StrategyMetrics(ann_return=0.18, ann_vol=0.12, ann_sharpe=1.5, max_dd=-0.08),
+        expr='clip(feat("c_sek")/lag(feat("c_sek"),1)-1)',
+        metrics=StrategyMetrics(
+            ann_return=0.18, ann_vol=0.12, ann_sharpe=1.5, max_dd=-0.08
+        ),
         complexity_score=14.2,
         created_at=NOW - timedelta(days=3),
         tags=["momentum", "fx"],
@@ -55,8 +84,10 @@ SAMPLE_STRATEGIES: dict[str, StrategyDetail] = {
     ),
     "def456": StrategyDetail(
         expr_hash="def456",
-        expr="rank(zscore(feat(\"spread_eur_sek\"))) > 0.5",
-        metrics=StrategyMetrics(ann_return=0.11, ann_vol=0.09, ann_sharpe=1.2, max_dd=-0.06),
+        expr='rank(zscore(feat("spread_eur_sek"))) > 0.5',
+        metrics=StrategyMetrics(
+            ann_return=0.11, ann_vol=0.09, ann_sharpe=1.2, max_dd=-0.06
+        ),
         complexity_score=9.8,
         created_at=NOW - timedelta(days=7),
         tags=["mean-reversion"],
@@ -80,84 +111,62 @@ SAMPLE_EQUITY_CURVES: dict[str, EquityCurve] = {
 }
 
 SAMPLE_RETURNS: dict[str, DailyReturns] = {
-    key: DailyReturns(expr_hash=curve.expr_hash, dates=curve.dates, returns=[round(v - 1, 4) for v in curve.equity])
+    key: DailyReturns(
+        expr_hash=curve.expr_hash,
+        dates=curve.dates,
+        returns=[round(v - 1, 4) for v in curve.equity],
+    )
     for key, curve in SAMPLE_EQUITY_CURVES.items()
 }
 
-SAMPLE_JOBS: dict[str, JobStatus] = {
-    "job_train_001": JobStatus(
-        job_id="job_train_001",
-        type="train",
-        status="completed",
-        progress=1.0,
-        processed=50,
-        submitted_at=NOW - timedelta(hours=5),
-        started_at=NOW - timedelta(hours=4, minutes=45),
-        completed_at=NOW - timedelta(hours=4, minutes=15),
-        summary=SAMPLE_STRATEGIES["abc123"],
-    ),
-    "job_bt_001": JobStatus(
-        job_id="job_bt_001",
-        type="backtest",
-        status="running",
-        progress=0.42,
-        processed=21,
-        submitted_at=NOW - timedelta(minutes=45),
-        started_at=NOW - timedelta(minutes=40),
-        completed_at=None,
-        summary=None,
-    ),
-}
-
-SAMPLE_JOB_LOGS: dict[str, list[JobLogEntry]] = {
-    "job_train_001": [
-        JobLogEntry(
-            ts=NOW - timedelta(hours=4, minutes=45),
-            level="INFO",
-            message="job_start",
-            context={"type": "train"},
-        ),
-        JobLogEntry(
-            ts=NOW - timedelta(hours=4, minutes=20),
-            level="INFO",
-            message="expr_evaluated",
-            context={"processed": 25, "total": 50},
-        ),
-        JobLogEntry(
-            ts=NOW - timedelta(hours=4, minutes=15),
-            level="INFO",
-            message="job_complete",
-            context={"result": "success"},
-        ),
-    ]
-}
+"""Legacy job/backtest placeholders removed in UI-only mode."""
 
 SAMPLE_FEATURES = FeatureCatalogResponse(
     features=[
-        FeatureDefinition(name="feat_price_sek", description="SEK close price", group="prices"),
-        FeatureDefinition(name="feat_volume", description="Daily traded volume", group="volume"),
+        FeatureDefinition(
+            name="feat_price_sek", description="SEK close price", group="prices"
+        ),
+        FeatureDefinition(
+            name="feat_volume", description="Daily traded volume", group="volume"
+        ),
     ]
 )
 
 SAMPLE_PRIMITIVES = PrimitiveCatalogResponse(
     primitives=[
-        PrimitiveDefinition(name="lag", description="Lag a feature by N periods", arity=2, category="transform"),
-        PrimitiveDefinition(name="zscore", description="Z-score normalisation", arity=1, category="transform"),
-        PrimitiveDefinition(name="clip", description="Clamp values within a range", arity=3, category="math"),
+        PrimitiveDefinition(
+            name="lag",
+            description="Lag a feature by N periods",
+            arity=2,
+            category="transform",
+        ),
+        PrimitiveDefinition(
+            name="zscore",
+            description="Z-score normalisation",
+            arity=1,
+            category="transform",
+        ),
+        PrimitiveDefinition(
+            name="clip",
+            description="Clamp values within a range",
+            arity=3,
+            category="math",
+        ),
     ]
 )
 
-SAMPLE_POSITIONS = [
-    BrokerPosition(symbol="EURSEK", quantity=1_000_000, avg_price=11.2, market_value=1_000_000 * 11.35, currency="SEK"),
-    BrokerPosition(symbol="USDSEK", quantity=-500_000, avg_price=10.4, market_value=-500_000 * 10.25, currency="SEK"),
-]
+# Broker sample positions removed (disabled broker)
 
 
-@router.get("/health", response_model=HealthResponse, tags=["health"], summary="Health probe")
+@router.get(
+    "/health", response_model=HealthResponse, tags=["health"], summary="Health probe"
+)
 async def health(settings: SettingsDep) -> HealthResponse:
     """Return liveness information for the service."""
 
-    return HealthResponse(status="ok", version=settings.version, git_commit=settings.git_commit)
+    return HealthResponse(
+        status="ok", version=settings.version, git_commit=settings.git_commit
+    )
 
 
 @router.get(
@@ -166,12 +175,22 @@ async def health(settings: SettingsDep) -> HealthResponse:
     tags=["strategies"],
     summary="List strategies",
 )
-async def list_strategies(limit: int = 20, offset: int = 0) -> StrategyListResponse:
-    """Return a paginated list of strategy summaries."""
-
+async def list_strategies(
+    limit: int = 20, offset: int = 0, settings: SettingsDep = Depends(get_settings)
+) -> StrategyListResponse:
+    # type: ignore[assignment]
+    """Return strategy summaries from external engine or fallback sample."""
+    if not settings.disable_adapter and adapter_available():
+        return await fetch_strategies(limit=limit, offset=offset)
+    # JSON provider path
+    json_payload = json_list_strategies(limit, offset)
+    if json_payload:
+        return json_payload
     items = list(SAMPLE_STRATEGIES.values())
     sliced = items[offset : offset + limit]
-    return StrategyListResponse(items=sliced, total=len(items), limit=limit, offset=offset)
+    return StrategyListResponse(
+        items=sliced, total=len(items), limit=limit, offset=offset
+    )
 
 
 @router.get(
@@ -180,9 +199,17 @@ async def list_strategies(limit: int = 20, offset: int = 0) -> StrategyListRespo
     tags=["strategies"],
     summary="Strategy detail",
 )
-async def get_strategy(expr_hash: str) -> StrategyDetail:
-    """Return metadata and metrics for a specific strategy."""
-
+async def get_strategy(
+    expr_hash: str, settings: SettingsDep = Depends(get_settings)
+) -> StrategyDetail:
+    # type: ignore[assignment]
+    if not settings.disable_adapter and adapter_available():
+        detail = await fetch_strategy_detail(expr_hash)
+        if detail:
+            return detail
+    json_detail = json_strategy_detail(expr_hash)
+    if json_detail:
+        return json_detail
     strategy = SAMPLE_STRATEGIES.get(expr_hash)
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
@@ -195,9 +222,17 @@ async def get_strategy(expr_hash: str) -> StrategyDetail:
     tags=["strategies"],
     summary="Strategy equity curve",
 )
-async def get_equity_curve(expr_hash: str) -> EquityCurve:
-    """Return an equity curve for the requested strategy."""
-
+async def get_equity_curve(
+    expr_hash: str, settings: SettingsDep = Depends(get_settings)
+) -> EquityCurve:
+    # type: ignore[assignment]
+    if not settings.disable_adapter and adapter_available():
+        curve = await fetch_equity_curve(expr_hash)
+        if curve:
+            return curve
+    json_curve = json_equity_curve(expr_hash)
+    if json_curve:
+        return json_curve
     curve = SAMPLE_EQUITY_CURVES.get(expr_hash)
     if not curve:
         raise HTTPException(status_code=404, detail="Equity curve not found")
@@ -210,9 +245,21 @@ async def get_equity_curve(expr_hash: str) -> EquityCurve:
     tags=["strategies"],
     summary="Strategy daily returns",
 )
-async def get_daily_returns(expr_hash: str) -> DailyReturns:
-    """Return the raw returns for the requested strategy."""
-
+async def get_daily_returns(
+    expr_hash: str, settings: SettingsDep = Depends(get_settings)
+) -> DailyReturns:
+    # type: ignore[assignment]
+    if not settings.disable_adapter and adapter_available():
+        curve = await fetch_equity_curve(expr_hash)
+        if curve:
+            eq = curve.equity
+            returns = [round(eq[i] / eq[i - 1] - 1, 6) for i in range(1, len(eq))]
+            return DailyReturns(
+                expr_hash=expr_hash, dates=curve.dates[1:], returns=returns
+            )
+    json_ret = json_daily_returns(expr_hash)
+    if json_ret:
+        return json_ret
     payload = SAMPLE_RETURNS.get(expr_hash)
     if not payload:
         raise HTTPException(status_code=404, detail="Returns not found")
@@ -237,112 +284,41 @@ async def aggregate_metrics() -> AggregateMetrics:
     )
 
 
-@router.post(
-    "/backtest",
-    response_model=BacktestResponse,
-    tags=["backtest"],
-    summary="Launch an ad-hoc backtest",
-)
-async def run_backtest(request: BacktestRequest) -> BacktestResponse:
-    """Accept a backtest request and return a stub response."""
-
-    job_id = f"job_bt_{uuid4().hex[:8]}"
-    summary = StrategySummary(
-        expr_hash=uuid4().hex[:6],
-        expr=request.expr,
-        metrics=StrategyMetrics(ann_return=0.05, ann_vol=0.08, ann_sharpe=0.9, max_dd=-0.12),
-        complexity_score=7.5,
-        created_at=NOW,
+@router.post("/backtest", tags=["backtest"], summary="Disabled backtest endpoint")
+async def run_backtest_disabled() -> dict[str, str]:
+    raise HTTPException(
+        status_code=501, detail="Backtest functionality disabled in UI-only mode"
     )
-    job = JobStatus(
-        job_id=job_id,
-        type="backtest",
-        status="queued",
-        progress=0.0,
-        processed=0,
-        submitted_at=NOW,
-        started_at=None,
-        completed_at=None,
-        summary=summary,
+
+
+@router.post("/jobs/train", tags=["jobs"], summary="Disabled training endpoint")
+async def launch_training_job_disabled() -> dict[str, str]:
+    raise HTTPException(
+        status_code=501, detail="Training/jobs disabled in UI-only mode"
     )
-    SAMPLE_JOBS[job_id] = job
-    SAMPLE_JOB_LOGS[job_id] = [
-        JobLogEntry(ts=NOW, level="INFO", message="job_queued", context={"expr": request.expr})
-    ]
-    return BacktestResponse(job_id=job_id, status="queued", result=summary)
 
 
-@router.post(
-    "/jobs/train",
-    response_model=JobStatus,
-    tags=["jobs"],
-    summary="Launch a training job",
-)
-async def launch_training_job(request: TrainJobRequest) -> JobStatus:
-    """Accept a training job request and return the queued job."""
-
-    job_id = f"job_train_{uuid4().hex[:8]}"
-    job = JobStatus(
-        job_id=job_id,
-        type="train",
-        status="queued",
-        progress=0.0,
-        processed=0,
-        submitted_at=NOW,
-        started_at=None,
-        completed_at=None,
-        summary=None,
-    )
-    SAMPLE_JOBS[job_id] = job
-    SAMPLE_JOB_LOGS[job_id] = [
-        JobLogEntry(ts=NOW, level="INFO", message="job_queued", context={"n": request.n})
-    ]
-    return job
+@router.get("/jobs", tags=["jobs"], summary="Jobs disabled")
+async def list_jobs_disabled() -> dict[str, str]:
+    raise HTTPException(status_code=501, detail="Jobs disabled in UI-only mode")
 
 
-@router.get("/jobs", response_model=JobListResponse, tags=["jobs"], summary="List jobs")
-async def list_jobs() -> JobListResponse:
-    """Return the tracked jobs."""
-
-    items = sorted(SAMPLE_JOBS.values(), key=lambda job: job.submitted_at, reverse=True)
-    return JobListResponse(items=items, total=len(items))
+@router.get("/jobs/{job_id}", tags=["jobs"], summary="Job detail disabled")
+async def get_job_disabled(job_id: str) -> dict[str, str]:
+    raise HTTPException(status_code=501, detail="Jobs disabled in UI-only mode")
 
 
-@router.get("/jobs/{job_id}", response_model=JobStatus, tags=["jobs"], summary="Job detail")
-async def get_job(job_id: str) -> JobStatus:
-    """Return a specific job."""
-
-    job = SAMPLE_JOBS.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job
-
-
-@router.get(
-    "/jobs/{job_id}/log",
-    response_model=JobLogResponse,
-    tags=["jobs"],
-    summary="Job logs",
-)
-async def get_job_log(job_id: str) -> JobLogResponse:
-    """Return accumulated logs for a job."""
-
-    entries = SAMPLE_JOB_LOGS.get(job_id)
-    if entries is None:
-        raise HTTPException(status_code=404, detail="Job log not found")
-    return JobLogResponse(job_id=job_id, entries=entries)
+@router.get("/jobs/{job_id}/log", tags=["jobs"], summary="Job logs disabled")
+async def get_job_log_disabled(job_id: str) -> dict[str, str]:
+    raise HTTPException(status_code=501, detail="Jobs disabled in UI-only mode")
 
 
 @router.websocket("/jobs/{job_id}/stream")
-async def job_stream(websocket: WebSocket, job_id: str) -> None:
-    """Serve a minimal websocket that streams a job snapshot."""
-
+async def job_stream_disabled(
+    websocket: WebSocket, job_id: str
+) -> None:  # pragma: no cover - simple disable
     await websocket.accept()
-    job = SAMPLE_JOBS.get(job_id)
-    if job is None:
-        await websocket.send_json({"event": "error", "detail": "Job not found"})
-    else:
-        await websocket.send_json({"event": "snapshot", "job": job.model_dump(mode="json")})
+    await websocket.send_json({"event": "error", "detail": "Job streaming disabled"})
     await websocket.close()
 
 
@@ -352,9 +328,17 @@ async def job_stream(websocket: WebSocket, job_id: str) -> None:
     tags=["config"],
     summary="Feature catalog",
 )
-async def feature_catalog() -> FeatureCatalogResponse:
-    """Return the DSL feature catalog."""
-
+async def feature_catalog(
+    settings: SettingsDep = Depends(get_settings),
+) -> FeatureCatalogResponse:
+    # type: ignore[assignment]
+    if not settings.disable_adapter and adapter_available():
+        catalog = await fetch_feature_catalog()
+        if catalog:
+            return catalog
+    json_cat = json_feature_catalog()
+    if json_cat:
+        return json_cat
     return SAMPLE_FEATURES
 
 
@@ -364,41 +348,225 @@ async def feature_catalog() -> FeatureCatalogResponse:
     tags=["config"],
     summary="Primitive catalog",
 )
-async def primitive_catalog() -> PrimitiveCatalogResponse:
-    """Return DSL primitive metadata."""
-
+async def primitive_catalog(
+    settings: SettingsDep = Depends(get_settings),
+) -> PrimitiveCatalogResponse:
+    # type: ignore[assignment]
+    if not settings.disable_adapter and adapter_available():
+        primitives = await fetch_primitive_catalog()
+        if primitives:
+            return primitives
+    json_prims = json_primitive_catalog()
+    if json_prims:
+        return json_prims
     return SAMPLE_PRIMITIVES
 
 
-@router.get(
-    "/broker/positions",
-    response_model=list[BrokerPosition],
-    tags=["broker"],
-    summary="Broker positions",
-)
-async def broker_positions() -> list[BrokerPosition]:
-    """Return dummy broker positions."""
+@router.get("/panel/slice", tags=["panel"], summary="Panel slice")
+async def panel_slice(
+    start: str | None = None,
+    end: str | None = None,
+    tickers: str | None = None,
+    limit_tickers: int | None = None,
+) -> dict:
+    """Return a lightweight slice of the curated panel for charting.
 
-    return SAMPLE_POSITIONS
-
-
-@router.post(
-    "/broker/orders",
-    response_model=OrderResponse,
-    tags=["broker"],
-    summary="Submit broker order",
-)
-async def place_order(payload: OrderRequest) -> OrderResponse:
-    """Accept an order and respond with an acknowledgement."""
-
-    status: str = "accepted" if payload.qty > 0 else "rejected"
-    order = OrderResponse(
-        order_id=f"ord_{uuid4().hex[:10]}",
-        status=status,
-        submitted_at=datetime.now(UTC),
-        symbol=payload.symbol,
-        side=payload.side,
-        qty=payload.qty,
-        order_type=payload.order_type,
+    Parameters
+    ----------
+    start, end: ISO date bounds (inclusive) as strings.
+    tickers: Comma delimited ticker list.
+    limit_tickers: Optional cap on distinct tickers (applied after filter).
+    """
+    settings = get_settings()
+    ticker_list = (
+        [t.strip() for t in tickers.split(",") if t.strip()] if tickers else None
     )
-    return order
+    if ticker_list and limit_tickers:
+        ticker_list = ticker_list[:limit_tickers]
+    payload = load_panel_slice(
+        settings.data_root, start=start, end=end, tickers=ticker_list
+    )
+    return payload
+
+
+# --------------------------- Artifacts passthrough ---------------------------
+
+
+@router.get(
+    "/artifacts/manifest", tags=["artifacts"], summary="Raw manifest.json contents"
+)
+async def artifacts_manifest() -> dict:
+    settings = get_settings()
+    manifest_path = Path(settings.artifacts_root) / "manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail="manifest.json not found")
+    return load_manifest(manifest_path)
+
+
+def _filter_entries(manifest: dict, kind: str) -> list[dict]:
+    entries = manifest.get("entries", [])
+    return [e for e in entries if e.get("kind") == kind]
+
+
+# --------------------------- Catalog aggregation ----------------------------
+
+
+@router.get(
+    "/catalog/manifest",
+    response_model=CatalogManifest,
+    tags=["catalog"],
+    summary="Aggregated catalog manifest",
+)
+async def catalog_manifest(settings: SettingsDep) -> CatalogManifest:
+    """Return a unified catalog combining features, primitives, strategy tag
+    frequencies, artifact kind counts and dataset listing.
+
+    Falls back to in-memory samples if adapter/artifacts are unavailable.
+    """
+    # Features & primitives (adapter first, else samples)
+    if adapter_available():
+        feature_catalog = await fetch_feature_catalog() or SAMPLE_FEATURES
+        primitive_catalog = await fetch_primitive_catalog() or SAMPLE_PRIMITIVES
+        strategies_payload = await fetch_strategies(limit=500, offset=0)
+        strategies = (
+            strategies_payload.items
+            if strategies_payload
+            else list(SAMPLE_STRATEGIES.values())
+        )
+    else:
+        feature_catalog = SAMPLE_FEATURES
+        primitive_catalog = SAMPLE_PRIMITIVES
+        strategies = list(SAMPLE_STRATEGIES.values())
+
+    # Strategy tag stats
+    tag_counter: Counter[str] = Counter()
+    for s in strategies:
+        if getattr(s, "tags", None):
+            tag_counter.update(s.tags)  # type: ignore[arg-type]
+    tag_stats = [
+        CatalogStrategyTagStat(tag=k, count=v) for k, v in tag_counter.most_common()
+    ]
+
+    # Artifacts manifest & dataset extraction
+    manifest_path = Path(settings.artifacts_root) / "manifest.json"
+    artifact_counts = CatalogArtifactCounts()
+    datasets: list[CatalogDatasetEntry] = []
+
+    def _parse_created(value: str | None) -> datetime:
+        if not value:
+            return NOW
+        v = value.strip()
+        if v.endswith("Z"):
+            v = v[:-1]
+        try:
+            return datetime.fromisoformat(v)
+        except Exception:
+            return NOW
+
+    if manifest_path.exists():
+        m = load_manifest(manifest_path)
+        entries = m.get("entries", [])
+        kind_counter: Counter[str] = Counter(e.get("kind") for e in entries)
+        artifact_counts = CatalogArtifactCounts(
+            models=kind_counter.get("model", 0),
+            reports=kind_counter.get("report", 0),
+            signals=kind_counter.get("signal", 0),
+            logs=kind_counter.get("log", 0),
+            datasets=kind_counter.get("dataset", 0),
+            strategies=kind_counter.get("strategie", 0),  # backward compat
+        )
+        for e in entries:
+            if e.get("kind") == "dataset":
+                datasets.append(
+                    CatalogDatasetEntry(
+                        file=e.get("file"),
+                        size=e.get("size", 0),
+                        created=_parse_created(e.get("created")),
+                    )
+                )
+
+    return CatalogManifest(
+        generated_at=NOW,
+        git_commit=settings.git_commit,
+        data_version=settings.data_version,
+        feature_count=len(feature_catalog.features),
+        primitive_count=len(primitive_catalog.primitives),
+        features=feature_catalog.features,
+        primitives=primitive_catalog.primitives,
+        strategy_tags=tag_stats,
+        artifacts=artifact_counts,
+        datasets=datasets,
+        version=1,
+    )
+
+
+@router.get("/artifacts/models", tags=["artifacts"], summary="Model artifact list")
+async def list_models() -> dict:
+    settings = get_settings()
+    manifest_path = Path(settings.artifacts_root) / "manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail="manifest.json not found")
+    m = load_manifest(manifest_path)
+    return {"models": _filter_entries(m, "model")}
+
+
+@router.get("/artifacts/reports", tags=["artifacts"], summary="Report artifact list")
+async def list_reports() -> dict:
+    settings = get_settings()
+    manifest_path = Path(settings.artifacts_root) / "manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail="manifest.json not found")
+    m = load_manifest(manifest_path)
+    return {"reports": _filter_entries(m, "report")}
+
+
+@router.get("/artifacts/signals", tags=["artifacts"], summary="Signal artifact list")
+async def list_signals() -> dict:
+    settings = get_settings()
+    manifest_path = Path(settings.artifacts_root) / "manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail="manifest.json not found")
+    m = load_manifest(manifest_path)
+    return {"signals": _filter_entries(m, "signal")}
+
+
+@router.get("/artifacts/logs", tags=["artifacts"], summary="Log artifact list")
+async def list_logs() -> dict:
+    settings = get_settings()
+    manifest_path = Path(settings.artifacts_root) / "manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail="manifest.json not found")
+    m = load_manifest(manifest_path)
+    return {"logs": _filter_entries(m, "log")}
+
+
+@router.get("/artifacts/datasets", tags=["artifacts"], summary="Dataset artifact list")
+async def list_datasets() -> dict:
+    settings = get_settings()
+    manifest_path = Path(settings.artifacts_root) / "manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail="manifest.json not found")
+    m = load_manifest(manifest_path)
+    return {"datasets": _filter_entries(m, "dataset")}
+
+
+@router.get(
+    "/artifacts/strategies", tags=["artifacts"], summary="Strategy artifact list"
+)
+async def list_strategy_artifacts() -> dict:
+    settings = get_settings()
+    manifest_path = Path(settings.artifacts_root) / "manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail="manifest.json not found")
+    m = load_manifest(manifest_path)
+    return {"strategies": _filter_entries(m, "strategie")}
+
+
+"""Broker endpoints removed in UI-only mode."""
+
+
+@router.post("/broker/orders", tags=["broker"], summary="Broker disabled")
+async def place_order_disabled() -> dict[str, str]:
+    raise HTTPException(
+        status_code=501, detail="Broker functionality disabled in UI-only mode"
+    )

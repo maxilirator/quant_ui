@@ -1,6 +1,8 @@
 """Entrypoint for the Quant UI FastAPI application."""
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException
+import sys
+from pathlib import Path
 
 from app.api import api_router
 from app.core.config import get_settings
@@ -8,6 +10,38 @@ from app.core.config import get_settings
 settings = get_settings()
 
 app = FastAPI(title=settings.app_name, version=settings.version)
+
+# Dynamically add external quant core path to sys.path if provided
+if settings.quant_core_root:
+    core_path = Path(settings.quant_core_root).resolve()
+    if core_path.is_dir():
+        if str(core_path) not in sys.path:
+            sys.path.insert(0, str(core_path))
+    else:
+        # Leave a breadcrumb in app state for debugging; real logging infra TBD
+        app.state.quant_core_missing = str(core_path)
+
+
+READ_ONLY_ALLOWED_METHODS = {"GET", "HEAD", "OPTIONS", "WEBSOCKET"}
+
+
+@app.middleware("http")
+async def read_only_guard(request: Request, call_next):  # pragma: no cover simple logic
+    method = request.method.upper()
+    # Skip health root POST blockers only for allowed methods
+    if method not in READ_ONLY_ALLOWED_METHODS:
+        # Allow explicit POST on /health if ever needed? Currently disallow.
+        raise HTTPException(
+            status_code=405, detail="Read-only mode: method not allowed"
+        )
+    # Optional API key header enforcement for artifacts endpoints
+    api_key_setting = settings.api_key
+    if api_key_setting and request.url.path.startswith("/api/artifacts"):
+        provided = request.headers.get("X-API-Key")
+        if not provided or provided != api_key_setting:
+            raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    response = await call_next(request)
+    return response
 
 
 @app.get("/", tags=["health"], summary="Service landing endpoint")

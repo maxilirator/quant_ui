@@ -11,10 +11,16 @@ from pydantic import BaseModel, Field
 class StrategyMetrics(BaseModel):
     """Core metrics exposed for a strategy."""
 
-    ann_return: float = Field(..., description="Annualised return expressed as a decimal fraction.")
-    ann_vol: float = Field(..., description="Annualised volatility expressed as a decimal fraction.")
+    ann_return: float = Field(
+        ..., description="Annualised return expressed as a decimal fraction."
+    )
+    ann_vol: float = Field(
+        ..., description="Annualised volatility expressed as a decimal fraction."
+    )
     ann_sharpe: float = Field(..., description="Annualised Sharpe ratio.")
-    max_dd: float = Field(..., description="Maximum drawdown experienced by the strategy.")
+    max_dd: float = Field(
+        ..., description="Maximum drawdown experienced by the strategy."
+    )
 
 
 class StrategySummary(BaseModel):
@@ -211,11 +217,52 @@ class HealthResponse(BaseModel):
     git_commit: str | None = None
 
 
+# ---------------- Catalog Aggregation (optional) ----------------
+
+
+class CatalogArtifactCounts(BaseModel):
+    models: int = 0
+    reports: int = 0
+    signals: int = 0
+    logs: int = 0
+    datasets: int = 0
+    strategies: int = 0
+
+
+class CatalogStrategyTagStat(BaseModel):
+    tag: str
+    count: int
+
+
+class CatalogDatasetEntry(BaseModel):
+    file: str
+    size: int
+    created: datetime
+
+
+class CatalogManifest(BaseModel):
+    generated_at: datetime
+    git_commit: str | None = None
+    data_version: str | None = None
+    feature_count: int
+    primitive_count: int
+    features: list[FeatureDefinition]
+    primitives: list[PrimitiveDefinition]
+    strategy_tags: list[CatalogStrategyTagStat]
+    artifacts: CatalogArtifactCounts
+    datasets: list[CatalogDatasetEntry] = Field(default_factory=list)
+    version: int = 1
+
+
 __all__ = [
     "AggregateMetrics",
     "BacktestRequest",
     "BacktestResponse",
     "BrokerPosition",
+    "CatalogArtifactCounts",
+    "CatalogDatasetEntry",
+    "CatalogManifest",
+    "CatalogStrategyTagStat",
     "DailyReturns",
     "EquityCurve",
     "FeatureCatalogResponse",

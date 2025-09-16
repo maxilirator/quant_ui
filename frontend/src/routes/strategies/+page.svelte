@@ -38,7 +38,7 @@
       <article class="card">
         <header>
           <div>
-            <h3>{strategy.expr_hash}</h3>
+            <h3><a class="hash-link" href={`/strategies/${strategy.expr_hash}`}>{strategy.expr_hash}</a></h3>
             {#if strategy.tags?.length}
               <ul class="tags">
                 {#each strategy.tags as tag}
@@ -162,6 +162,15 @@
   .card h3 {
     margin: 0;
     font-size: 1.2rem;
+  }
+
+  .hash-link {
+    color: #f1f5f9;
+    text-decoration: none;
+  }
+
+  .hash-link:hover {
+    text-decoration: underline;
   }
 
   .tags {

@@ -21,6 +21,9 @@
     <nav>
       <a href="/">Overview</a>
       <a href="/strategies">Strategies</a>
+      <a href="/catalog">Catalog</a>
+      <a href="/panel">Panel</a>
+      <a href="/artifacts">Artifacts</a>
     </nav>
   </header>
   <main>
