@@ -39,6 +39,7 @@ from .schemas import (
     StrategyListResponse,
     StrategyMetrics,
     StrategySummary,
+    StrategyAnalysis,
 )
 
 from app.engine_adapter import (
@@ -56,6 +57,10 @@ from app.providers.json_provider import (
     load_strategy_detail as json_strategy_detail,
     load_equity_curve as json_equity_curve,
     load_daily_returns as json_daily_returns,
+)
+from app.providers.config_strategy_provider import (
+    load_config_strategies,
+    load_config_strategy_detail,
 )
 from .panel import load_panel_slice
 from app.artifacts.manifest import load_manifest
@@ -158,6 +163,22 @@ SAMPLE_PRIMITIVES = PrimitiveCatalogResponse(
 # Broker sample positions removed (disabled broker)
 
 
+# --------------------------- Helpers ---------------------------------------
+
+
+def _get_manifest_path(settings: Settings) -> Path | None:
+    """Return manifest.json path if artifacts_root configured, else None.
+
+    We guard Path() construction because settings.artifacts_root may be None
+    when the environment variable is not supplied; constructing Path(None)
+    triggers type checker errors and runtime issues.
+    """
+    root = getattr(settings, "artifacts_root", None)
+    if not root:
+        return None
+    return Path(root) / "manifest.json"
+
+
 @router.get(
     "/health", response_model=HealthResponse, tags=["health"], summary="Health probe"
 )
@@ -176,20 +197,96 @@ async def health(settings: SettingsDep) -> HealthResponse:
     summary="List strategies",
 )
 async def list_strategies(
-    limit: int = 20, offset: int = 0, settings: SettingsDep = Depends(get_settings)
+    settings: SettingsDep, limit: int = 20, offset: int = 0, order: str | None = None
 ) -> StrategyListResponse:
     # type: ignore[assignment]
     """Return strategy summaries from external engine or fallback sample."""
     if not settings.disable_adapter and adapter_available():
-        return await fetch_strategies(limit=limit, offset=offset)
+        payload = await fetch_strategies(limit=limit, offset=offset)
+        # Local ordering if requested (adapter returns full slice only; we cannot re-fetch total sorted upstream yet)
+        if order:
+            # Apply ordering to current page only (documentation: adapter ordering limited)
+            def _metric_val(s: StrategySummary, field: str):
+                return getattr(s.metrics, field)
+
+            def _apply_local(items: list[StrategySummary]):
+                keys = [k.strip() for k in order.split(",") if k.strip()]
+                for k in reversed(keys):
+                    parts = k.split("_")
+                    if len(parts) < 2:
+                        field = k
+                        direction = "asc"
+                    else:
+                        field = "_".join(parts[:-1])
+                        direction = parts[-1]
+                    reverse = direction.lower() == "desc"
+                    if field in {"ann_return", "ann_vol", "ann_sharpe", "max_dd"}:
+                        items.sort(
+                            key=lambda s, f=field: _metric_val(s, f), reverse=reverse
+                        )
+                    elif field == "created_at":
+                        items.sort(key=lambda s: s.created_at, reverse=reverse)
+                    elif field in {"name", "expr_hash"}:
+                        items.sort(key=lambda s: s.expr_hash.lower(), reverse=reverse)
+                    elif field == "complexity_score":
+                        items.sort(key=lambda s: s.complexity_score, reverse=reverse)
+
+            _apply_local(payload.items)
+            payload.order = order  # type: ignore[attr-defined]
+        return payload
+    # Config provider (quant_core_root/configs/*.json) path
+    cfg_payload = load_config_strategies(limit, offset, order=order)
+    if cfg_payload:
+        return cfg_payload
     # JSON provider path
     json_payload = json_list_strategies(limit, offset)
     if json_payload:
+        # Attach order + sorting client side for JSON sample (limited set)
+        if order:
+            from copy import deepcopy
+
+            jp = deepcopy(json_payload)
+
+            # Reuse local apply code
+            def _metric_val(s: StrategySummary, field: str):
+                return getattr(s.metrics, field)
+
+            def _apply_local(items: list[StrategySummary]):
+                keys = [k.strip() for k in order.split(",") if k.strip()]
+                for k in reversed(keys):
+                    parts = k.split("_")
+                    if len(parts) < 2:
+                        field = k
+                        direction = "asc"
+                    else:
+                        field = "_".join(parts[:-1])
+                        direction = parts[-1]
+                    reverse = direction.lower() == "desc"
+                    if field in {"ann_return", "ann_vol", "ann_sharpe", "max_dd"}:
+                        items.sort(
+                            key=lambda s, f=field: _metric_val(s, f), reverse=reverse
+                        )
+                    elif field == "created_at":
+                        items.sort(key=lambda s: s.created_at, reverse=reverse)
+                    elif field in {"name", "expr_hash"}:
+                        items.sort(key=lambda s: s.expr_hash.lower(), reverse=reverse)
+                    elif field == "complexity_score":
+                        items.sort(key=lambda s: s.complexity_score, reverse=reverse)
+
+            _apply_local(jp.items)
+            jp.order = order  # type: ignore[attr-defined]
+            return jp
         return json_payload
-    items = list(SAMPLE_STRATEGIES.values())
-    sliced = items[offset : offset + limit]
-    return StrategyListResponse(
-        items=sliced, total=len(items), limit=limit, offset=offset
+    # No real source found -> raise 503 with simple diagnostics
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "error": "No strategy sources available",
+            "adapter_available": adapter_available(),
+            "config_root": getattr(settings, "quant_core_root", None),
+            "strategies_root": settings.strategies_root,
+            "hint": "Ensure QUANT_CORE_ROOT is set or provide strategies JSON/configs",
+        },
     )
 
 
@@ -199,21 +296,32 @@ async def list_strategies(
     tags=["strategies"],
     summary="Strategy detail",
 )
-async def get_strategy(
-    expr_hash: str, settings: SettingsDep = Depends(get_settings)
-) -> StrategyDetail:
+async def get_strategy(expr_hash: str, settings: SettingsDep) -> StrategyDetail:
     # type: ignore[assignment]
     if not settings.disable_adapter and adapter_available():
         detail = await fetch_strategy_detail(expr_hash)
         if detail:
             return detail
+    # Config provider
+    cfg_detail = load_config_strategy_detail(expr_hash)
+    if cfg_detail:
+        return cfg_detail
     json_detail = json_strategy_detail(expr_hash)
     if json_detail:
         return json_detail
-    strategy = SAMPLE_STRATEGIES.get(expr_hash)
-    if not strategy:
-        raise HTTPException(status_code=404, detail="Strategy not found")
-    return strategy
+    raise HTTPException(
+        status_code=404,
+        detail={
+            "error": "Strategy not found in any source",
+            "expr_hash": expr_hash,
+            "adapter_available": adapter_available(),
+            "searched": [
+                "adapter",
+                "config_strategies",
+                "json_provider",
+            ],
+        },
+    )
 
 
 @router.get(
@@ -222,9 +330,7 @@ async def get_strategy(
     tags=["strategies"],
     summary="Strategy equity curve",
 )
-async def get_equity_curve(
-    expr_hash: str, settings: SettingsDep = Depends(get_settings)
-) -> EquityCurve:
+async def get_equity_curve(expr_hash: str, settings: SettingsDep) -> EquityCurve:
     # type: ignore[assignment]
     if not settings.disable_adapter and adapter_available():
         curve = await fetch_equity_curve(expr_hash)
@@ -245,9 +351,7 @@ async def get_equity_curve(
     tags=["strategies"],
     summary="Strategy daily returns",
 )
-async def get_daily_returns(
-    expr_hash: str, settings: SettingsDep = Depends(get_settings)
-) -> DailyReturns:
+async def get_daily_returns(expr_hash: str, settings: SettingsDep) -> DailyReturns:
     # type: ignore[assignment]
     if not settings.disable_adapter and adapter_available():
         curve = await fetch_equity_curve(expr_hash)
@@ -329,7 +433,7 @@ async def job_stream_disabled(
     summary="Feature catalog",
 )
 async def feature_catalog(
-    settings: SettingsDep = Depends(get_settings),
+    settings: SettingsDep,
 ) -> FeatureCatalogResponse:
     # type: ignore[assignment]
     if not settings.disable_adapter and adapter_available():
@@ -349,7 +453,7 @@ async def feature_catalog(
     summary="Primitive catalog",
 )
 async def primitive_catalog(
-    settings: SettingsDep = Depends(get_settings),
+    settings: SettingsDep,
 ) -> PrimitiveCatalogResponse:
     # type: ignore[assignment]
     if not settings.disable_adapter and adapter_available():
@@ -389,6 +493,111 @@ async def panel_slice(
     return payload
 
 
+# --------------------------- Strategy analysis -----------------------------
+import re
+
+_FEATURE_PATTERN = re.compile(r"feat\(\"([^\"]+)\"\)")
+
+
+def _parse_expression(
+    expr: str, primitive_names: list[str]
+) -> tuple[list[str], list[str]]:
+    """Extract features + primitive references from a DSL expression.
+
+    This is a heuristic (regex) approach suitable for UI surfacing; it is not
+    a full parser and may miss nested/obfuscated constructs, which is an
+    acceptable trade-off for responsiveness and zero external dependencies.
+    """
+    features = sorted({m.group(1) for m in _FEATURE_PATTERN.finditer(expr)})
+    primitives: set[str] = set()
+    for name in primitive_names:
+        if re.search(rf"\b{name}\b", expr):  # whole-word primitive reference
+            primitives.add(name)
+    return list(features), sorted(primitives)
+
+
+@router.get(
+    "/strategies/{expr_hash}/analysis",
+    response_model=StrategyAnalysis,
+    tags=["strategies"],
+    summary="Static expression analysis",
+)
+async def strategy_analysis(expr_hash: str, settings: SettingsDep) -> StrategyAnalysis:
+    """Return static analysis for the specified strategy expression.
+
+    Provides feature + primitive usage plus simple size metrics.
+    """
+    # Resolve strategy detail
+    if not settings.disable_adapter and adapter_available():
+        detail = await fetch_strategy_detail(expr_hash)
+    else:
+        detail = None
+    if detail is None:
+        detail = json_strategy_detail(expr_hash) or SAMPLE_STRATEGIES.get(expr_hash)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    # Resolve primitive catalog
+    if not settings.disable_adapter and adapter_available():
+        prim_catalog = await fetch_primitive_catalog()
+    else:
+        prim_catalog = None
+    if prim_catalog is None:
+        prim_catalog = json_primitive_catalog() or SAMPLE_PRIMITIVES
+
+    primitive_names = [p.name for p in prim_catalog.primitives]
+    features_used, primitives_used = _parse_expression(detail.expr, primitive_names)
+    expr_length = len(detail.expr)
+    token_count = len(re.findall(r"[A-Za-z_]+|\d+|[()><=/*+\-]", detail.expr))
+    return StrategyAnalysis(
+        expr_hash=expr_hash,
+        features_used=features_used,
+        primitives_used=primitives_used,
+        expr_length=expr_length,
+        token_count=token_count,
+    )
+
+
+# --------------------------- Debug / Source probe ---------------------------
+
+
+@router.get("/debug/source", tags=["debug"], summary="Active data source diagnostics")
+async def debug_source() -> dict:
+    """Return a diagnostic snapshot describing where strategy data is coming
+    from (adapter / config / json / none) plus key environment-derived paths.
+
+    This is useful when .env loading is in doubt; it allows the UI or a user
+    to confirm which layer provided (or failed to provide) strategy data.
+    """
+    settings = get_settings()
+    # Evaluate availability in precedence order used by list_strategies
+    source = "none"
+    adapter_ok = adapter_available() and not settings.disable_adapter
+    cfg_ok = bool(load_config_strategies(limit=1, offset=0))
+    json_ok = bool(json_list_strategies(limit=1, offset=0))
+    if adapter_ok:
+        source = "adapter"
+    elif cfg_ok:
+        source = "config"
+    elif json_ok:
+        source = "json"
+    return {
+        "source": source,
+        "adapter_available": adapter_ok,
+        "config_available": cfg_ok,
+        "json_available": json_ok,
+        "env": {
+            "quant_core_root": settings.quant_core_root,
+            "strategies_root": settings.strategies_root,
+            "catalog_root": settings.catalog_root,
+            "curves_root": settings.curves_root,
+            "artifacts_root": settings.artifacts_root,
+            "disable_adapter": settings.disable_adapter,
+        },
+        "hint": "Ensure .env is in the working directory where uvicorn is started or export QUANT_* vars before launch.",
+    }
+
+
 # --------------------------- Artifacts passthrough ---------------------------
 
 
@@ -397,7 +606,9 @@ async def panel_slice(
 )
 async def artifacts_manifest() -> dict:
     settings = get_settings()
-    manifest_path = Path(settings.artifacts_root) / "manifest.json"
+    manifest_path = _get_manifest_path(settings)
+    if manifest_path is None:
+        raise HTTPException(status_code=404, detail="artifacts_root not configured")
     if not manifest_path.exists():
         raise HTTPException(status_code=404, detail="manifest.json not found")
     return load_manifest(manifest_path)
@@ -448,7 +659,7 @@ async def catalog_manifest(settings: SettingsDep) -> CatalogManifest:
     ]
 
     # Artifacts manifest & dataset extraction
-    manifest_path = Path(settings.artifacts_root) / "manifest.json"
+    manifest_path = _get_manifest_path(settings)
     artifact_counts = CatalogArtifactCounts()
     datasets: list[CatalogDatasetEntry] = []
 
@@ -463,7 +674,7 @@ async def catalog_manifest(settings: SettingsDep) -> CatalogManifest:
         except Exception:
             return NOW
 
-    if manifest_path.exists():
+    if manifest_path and manifest_path.exists():
         m = load_manifest(manifest_path)
         entries = m.get("entries", [])
         kind_counter: Counter[str] = Counter(e.get("kind") for e in entries)
@@ -503,7 +714,9 @@ async def catalog_manifest(settings: SettingsDep) -> CatalogManifest:
 @router.get("/artifacts/models", tags=["artifacts"], summary="Model artifact list")
 async def list_models() -> dict:
     settings = get_settings()
-    manifest_path = Path(settings.artifacts_root) / "manifest.json"
+    manifest_path = _get_manifest_path(settings)
+    if manifest_path is None:
+        raise HTTPException(status_code=404, detail="artifacts_root not configured")
     if not manifest_path.exists():
         raise HTTPException(status_code=404, detail="manifest.json not found")
     m = load_manifest(manifest_path)
@@ -513,7 +726,9 @@ async def list_models() -> dict:
 @router.get("/artifacts/reports", tags=["artifacts"], summary="Report artifact list")
 async def list_reports() -> dict:
     settings = get_settings()
-    manifest_path = Path(settings.artifacts_root) / "manifest.json"
+    manifest_path = _get_manifest_path(settings)
+    if manifest_path is None:
+        raise HTTPException(status_code=404, detail="artifacts_root not configured")
     if not manifest_path.exists():
         raise HTTPException(status_code=404, detail="manifest.json not found")
     m = load_manifest(manifest_path)
@@ -523,7 +738,9 @@ async def list_reports() -> dict:
 @router.get("/artifacts/signals", tags=["artifacts"], summary="Signal artifact list")
 async def list_signals() -> dict:
     settings = get_settings()
-    manifest_path = Path(settings.artifacts_root) / "manifest.json"
+    manifest_path = _get_manifest_path(settings)
+    if manifest_path is None:
+        raise HTTPException(status_code=404, detail="artifacts_root not configured")
     if not manifest_path.exists():
         raise HTTPException(status_code=404, detail="manifest.json not found")
     m = load_manifest(manifest_path)
@@ -533,7 +750,9 @@ async def list_signals() -> dict:
 @router.get("/artifacts/logs", tags=["artifacts"], summary="Log artifact list")
 async def list_logs() -> dict:
     settings = get_settings()
-    manifest_path = Path(settings.artifacts_root) / "manifest.json"
+    manifest_path = _get_manifest_path(settings)
+    if manifest_path is None:
+        raise HTTPException(status_code=404, detail="artifacts_root not configured")
     if not manifest_path.exists():
         raise HTTPException(status_code=404, detail="manifest.json not found")
     m = load_manifest(manifest_path)
@@ -543,7 +762,9 @@ async def list_logs() -> dict:
 @router.get("/artifacts/datasets", tags=["artifacts"], summary="Dataset artifact list")
 async def list_datasets() -> dict:
     settings = get_settings()
-    manifest_path = Path(settings.artifacts_root) / "manifest.json"
+    manifest_path = _get_manifest_path(settings)
+    if manifest_path is None:
+        raise HTTPException(status_code=404, detail="artifacts_root not configured")
     if not manifest_path.exists():
         raise HTTPException(status_code=404, detail="manifest.json not found")
     m = load_manifest(manifest_path)
@@ -555,7 +776,9 @@ async def list_datasets() -> dict:
 )
 async def list_strategy_artifacts() -> dict:
     settings = get_settings()
-    manifest_path = Path(settings.artifacts_root) / "manifest.json"
+    manifest_path = _get_manifest_path(settings)
+    if manifest_path is None:
+        raise HTTPException(status_code=404, detail="artifacts_root not configured")
     if not manifest_path.exists():
         raise HTTPException(status_code=404, detail="manifest.json not found")
     m = load_manifest(manifest_path)

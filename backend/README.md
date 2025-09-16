@@ -21,24 +21,25 @@ The service exposes a curated subset of routes under the `/api` prefix. OpenAPI 
 
 ## Exposed Endpoints (Summary)
 
-| Route                          | Method | Purpose                                                           |
-| ------------------------------ | ------ | ----------------------------------------------------------------- |
-| /api/health                    | GET    | Liveness + version                                                |
-| /api/strategies                | GET    | List available strategies (external adapter or fallback sample)   |
-| /api/strategies/{hash}         | GET    | Strategy detail                                                   |
-| /api/strategies/{hash}/curve   | GET    | Equity curve                                                      |
-| /api/strategies/{hash}/returns | GET    | Derived daily returns (from equity)                               |
-| /api/metrics/aggregate         | GET    | Sample aggregate metrics (placeholder)                            |
-| /api/config/features           | GET    | Feature catalog (external or sample)                              |
-| /api/config/primitives         | GET    | Primitive catalog (external or sample)                            |
-| /api/panel/slice               | GET    | Narrow time-series slice (bars) with optional date/ticker filters |
-| /api/artifacts/manifest        | GET    | Raw artifact manifest JSON                                        |
-| /api/artifacts/models          | GET    | Filtered list (kind=model)                                        |
-| /api/artifacts/reports         | GET    | Filtered list (kind=report)                                       |
-| /api/artifacts/signals         | GET    | Filtered list (kind=signal)                                       |
-| /api/artifacts/logs            | GET    | Filtered list (kind=log)                                          |
-| /api/artifacts/datasets        | GET    | Filtered list (kind=dataset)                                      |
-| /api/artifacts/strategies      | GET    | Filtered list (kind=strategy\*/see note)                          |
+| Route                           | Method | Purpose                                                           |
+| ------------------------------- | ------ | ----------------------------------------------------------------- |
+| /api/health                     | GET    | Liveness + version                                                |
+| /api/strategies                 | GET    | List available strategies (external adapter or fallback sample)   |
+| /api/strategies/{hash}          | GET    | Strategy detail                                                   |
+| /api/strategies/{hash}/curve    | GET    | Equity curve                                                      |
+| /api/strategies/{hash}/returns  | GET    | Derived daily returns (from equity)                               |
+| /api/strategies/{hash}/analysis | GET    | Static expression analysis (features & primitives)                |
+| /api/metrics/aggregate          | GET    | Sample aggregate metrics (placeholder)                            |
+| /api/config/features            | GET    | Feature catalog (external or sample)                              |
+| /api/config/primitives          | GET    | Primitive catalog (external or sample)                            |
+| /api/panel/slice                | GET    | Narrow time-series slice (bars) with optional date/ticker filters |
+| /api/artifacts/manifest         | GET    | Raw artifact manifest JSON                                        |
+| /api/artifacts/models           | GET    | Filtered list (kind=model)                                        |
+| /api/artifacts/reports          | GET    | Filtered list (kind=report)                                       |
+| /api/artifacts/signals          | GET    | Filtered list (kind=signal)                                       |
+| /api/artifacts/logs             | GET    | Filtered list (kind=log)                                          |
+| /api/artifacts/datasets         | GET    | Filtered list (kind=dataset)                                      |
+| /api/artifacts/strategies       | GET    | Filtered list (kind=strategy\*/see note)                          |
 
 Disabled (return 501) routes: `/api/backtest`, `/api/jobs/*`, `/api/broker/*`.
 

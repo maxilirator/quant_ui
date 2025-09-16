@@ -47,6 +47,10 @@ class StrategyListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+    order: str | None = Field(
+        default=None,
+        description="Ordering applied to the collection (e.g. 'ann_return_desc,ann_sharpe_desc').",
+    )
 
 
 class EquityCurve(BaseModel):
@@ -254,6 +258,24 @@ class CatalogManifest(BaseModel):
     version: int = 1
 
 
+# ---------------- Strategy Expression Analysis ----------------
+
+
+class StrategyAnalysis(BaseModel):
+    """Lightweight static analysis of a strategy expression.
+
+    Provides introspection for UI components: which features and primitives
+    are referenced, along with simple size metrics. This is intentionally
+    heuristic (string / regex based) and does not perform full DSL parsing.
+    """
+
+    expr_hash: str
+    features_used: list[str] = Field(default_factory=list)
+    primitives_used: list[str] = Field(default_factory=list)
+    expr_length: int
+    token_count: int
+
+
 __all__ = [
     "AggregateMetrics",
     "BacktestRequest",
@@ -282,4 +304,5 @@ __all__ = [
     "StrategyMetrics",
     "StrategySummary",
     "TrainJobRequest",
+    "StrategyAnalysis",
 ]

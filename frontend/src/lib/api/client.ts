@@ -8,7 +8,7 @@ import type {
   EquityCurve,
   DailyReturns
 } from './types';
-import type { CatalogManifest } from './types';
+import type { CatalogManifest, StrategyAnalysis } from './types';
 
 const API_BASE_PATH = '/api';
 
@@ -77,6 +77,10 @@ export async function getEquityCurve(fetcher: typeof fetch, exprHash: string): P
 
 export async function getDailyReturns(fetcher: typeof fetch, exprHash: string): Promise<DailyReturns> {
   return request(fetcher, `/strategies/${exprHash}/returns`);
+}
+
+export async function getStrategyAnalysis(fetcher: typeof fetch, exprHash: string): Promise<StrategyAnalysis> {
+  return request(fetcher, `/strategies/${exprHash}/analysis`);
 }
 
 export interface PanelSliceParams {

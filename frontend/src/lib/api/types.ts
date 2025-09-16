@@ -20,6 +20,7 @@ export interface StrategyListResponse {
   total: number;
   limit: number;
   offset: number;
+  order?: string | null;
 }
 
 export interface EquityCurve {
@@ -27,6 +28,15 @@ export interface EquityCurve {
   base_currency: string;
   dates: string[];
   equity: number[];
+}
+
+// Static analysis of a strategy expression (features + primitives + size metrics)
+export interface StrategyAnalysis {
+  expr_hash: string;
+  features_used: string[];
+  primitives_used: string[];
+  expr_length: number;
+  token_count: number;
 }
 
 export interface DailyReturns {
