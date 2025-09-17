@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     curves_root: str | None = Field(
         default=None, alias="CURVES_ROOT"
     )  # curves/*.json or equity/*.json
+    dev_mode: bool = Field(default=False, alias="DEV_MODE")
 
     model_config = SettingsConfigDict(
         env_prefix="QUANT_", env_file=".env", extra="ignore"
@@ -80,6 +81,12 @@ class Settings(BaseSettings):
             object.__setattr__(self, "strategies_root", f"{qroot}/strategies_json")
         if not self.curves_root and qroot:
             object.__setattr__(self, "curves_root", f"{qroot}/equity_curves")
+
+        # Dev mode precedence: QUANT_DEV_MODE or DEV_MODE env overrides
+        dev_env = os.getenv("QUANT_DEV_MODE") or os.getenv("DEV_MODE")
+        if dev_env is not None:
+            val = dev_env.lower() in {"1", "true", "yes", "on"}
+            object.__setattr__(self, "dev_mode", val)
 
 
 @lru_cache

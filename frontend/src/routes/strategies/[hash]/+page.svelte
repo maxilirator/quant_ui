@@ -2,6 +2,59 @@
   import type { PageData } from "./$types";
   import LineChart from "$lib/components/LineChart.svelte";
   import ReturnsBarChart from "$lib/components/ReturnsBarChart.svelte";
+  import Histogram from "$lib/components/Histogram.svelte";
+  import MonthlyHeatmap from "$lib/components/MonthlyHeatmap.svelte";
+  // simple CSV export helpers (client-side only)
+  function toCSV(rows: Array<Record<string, any>>): string {
+    if (!rows.length) return "";
+    const set = rows.reduce<Set<string>>((s, r: Record<string, any>) => {
+      Object.keys(r).forEach((k) => s.add(k));
+      return s;
+    }, new Set<string>());
+    const cols = Array.from(set);
+    const escape = (v: any) => {
+      if (v == null) return "";
+      const s = String(v);
+      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    return [
+      cols.join(","),
+      ...rows.map((r) => cols.map((c) => escape(r[c])).join(",")),
+    ].join("\n");
+  }
+  function download(name: string, csv: string) {
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
+  function exportDaily() {
+    if (!data.returns) return;
+    const rows = data.returns.dates.map((d, i) => ({
+      date: d,
+      return: data.returns!.returns[i],
+    }));
+    download(
+      `${data.strategy?.expr_hash || "strategy"}_daily_returns.csv`,
+      toCSV(rows)
+    );
+  }
+  function exportMonthly() {
+    if (!data.analytics?.monthly_returns?.length) return;
+    download(
+      `${data.strategy?.expr_hash || "strategy"}_monthly_returns.csv`,
+      toCSV(data.analytics.monthly_returns)
+    );
+  }
+  function exportHistogram() {
+    if (!data.analytics?.return_histogram?.bins?.length) return;
+    download(
+      `${data.strategy?.expr_hash || "strategy"}_histogram.csv`,
+      toCSV(data.analytics.return_histogram.bins)
+    );
+  }
   let { data }: { data: PageData } = $props();
 
   const formatPercent = (v: number) => `${(v * 100).toFixed(2)}%`;
@@ -40,6 +93,20 @@
     {:else if data.diagnostics}
       <pre class="diag">{JSON.stringify(data.diagnostics, null, 2)}</pre>
     {/if}
+  </div>
+{/if}
+{#if Object.keys(data.fetchErrors || {}).length}
+  <div class="banner warn">
+    <strong>Partial data issues:</strong>
+    <ul class="errs">
+      {#each Object.entries(data.fetchErrors) as [k, v]}
+        <li>
+          <code>{k}</code>: {v.status || ""}
+          {v.message}
+          {#if v.detail?.detail?.error}- {v.detail.detail.error}{/if}
+        </li>
+      {/each}
+    </ul>
   </div>
 {/if}
 
@@ -117,9 +184,9 @@
       series={[
         {
           name: data.strategy?.expr_hash || "strategy",
-          points: data.equity.dates.map((d, i) => ({
+          points: data.equity!.dates.map((d, i) => ({
             x: d,
-            y: data.equity.equity[i],
+            y: data.equity!.equity[i],
           })),
         },
       ]}
@@ -131,6 +198,11 @@
   {/if}
 </section>
 
+<section class="benchmark-block">
+  <h3>Benchmark (placeholder)</h3>
+  <p class="empty">No benchmark series configured yet.</p>
+</section>
+
 <section class="returns-block">
   <h3>Daily Returns (last {data.returns?.returns.length} days)</h3>
   {#if data.returns}
@@ -139,9 +211,211 @@
       values={data.returns.returns}
       height={140}
     />
+    <div class="export-row">
+      <button onclick={exportDaily}>Export Daily CSV</button>
+    </div>
   {:else}
     <p>No return data.</p>
   {/if}
+</section>
+
+<section class="drawdown-block">
+  <h3>Drawdown</h3>
+  {#if data.analytics && data.analytics.drawdowns && data.analytics.drawdowns.length}
+    <LineChart
+      height={140}
+      series={[
+        {
+          name: "Drawdown",
+          points: data.analytics.dd_dates.map((d, i) => ({
+            x: d,
+            y: data.analytics!.drawdowns[i],
+          })),
+        },
+      ]}
+      showDots={false}
+      yFormat={(v) => (v * 100).toFixed(2) + "%"}
+    />
+    {#if data.analytics.top_drawdowns?.length}
+      <table class="dd-table">
+        <thead>
+          <tr
+            ><th>#</th><th>Start</th><th>Trough</th><th>Recovery</th><th
+              >Depth</th
+            ><th>Days ↓</th><th>Length</th></tr
+          >
+        </thead>
+        <tbody>
+          {#each data.analytics.top_drawdowns as ev, i}
+            <tr>
+              <td>{i + 1}</td>
+              <td>{ev.start}</td>
+              <td>{ev.trough}</td>
+              <td>{ev.recovery || "—"}</td>
+              <td class="neg">{(ev.depth * 100).toFixed(2)}%</td>
+              <td>{ev.days_to_trough}</td>
+              <td>{ev.length}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
+  {:else}
+    <p>No drawdown analytics.</p>
+  {/if}
+</section>
+
+<section class="rolling-block">
+  <h3>Rolling Metrics (window {data.analytics?.window || 252}d)</h3>
+  {#if data.analytics && data.analytics.rolling_return && data.analytics.rolling_return.length}
+    <div class="rolling-grid">
+      <div>
+        <h4>Rolling Return</h4>
+        <LineChart
+          height={120}
+          series={[
+            {
+              name: "Return",
+              points: data.analytics.dd_dates
+                .map((d, i) => ({ x: d, y: data.analytics!.rolling_return[i] }))
+                .filter((p) => p.y === p.y),
+            },
+          ]}
+          showDots={false}
+          yFormat={(v) => (v * 100).toFixed(1) + "%"}
+        />
+      </div>
+      <div>
+        <h4>Rolling Vol</h4>
+        <LineChart
+          height={120}
+          series={[
+            {
+              name: "Vol",
+              points: data.analytics.dd_dates
+                .map((d, i) => ({ x: d, y: data.analytics!.rolling_vol[i] }))
+                .filter((p) => p.y === p.y),
+            },
+          ]}
+          showDots={false}
+          yFormat={(v) => (v * 100).toFixed(1) + "%"}
+        />
+      </div>
+      <div>
+        <h4>Rolling Sharpe</h4>
+        <LineChart
+          height={120}
+          series={[
+            {
+              name: "Sharpe",
+              points: data.analytics.dd_dates
+                .map((d, i) => ({ x: d, y: data.analytics!.rolling_sharpe[i] }))
+                .filter((p) => p.y === p.y),
+            },
+          ]}
+          showDots={false}
+          yFormat={(v) => v.toFixed(2)}
+        />
+      </div>
+    </div>
+  {:else}
+    <p>No rolling metrics.</p>
+  {/if}
+</section>
+
+<section class="distribution-block">
+  <h3>Return Distribution</h3>
+  {#if data.analytics?.return_histogram?.bins?.length}
+    <Histogram
+      bins={data.analytics.return_histogram.bins}
+      total={data.analytics.return_histogram.total}
+      valueFormat={(v) => (v * 100).toFixed(2) + "%"}
+      height={120}
+    />
+    <div class="export-row">
+      <button onclick={exportHistogram}>Export Histogram CSV</button>
+    </div>
+  {:else}
+    <p class="empty">No histogram data.</p>
+  {/if}
+</section>
+
+<section class="monthly-block">
+  <h3>Monthly Performance</h3>
+  {#if data.analytics?.monthly_returns?.length}
+    <MonthlyHeatmap data={data.analytics.monthly_returns} />
+    <div class="export-row">
+      <button onclick={exportMonthly}>Export Monthly CSV</button>
+    </div>
+  {:else}
+    <p class="empty">No monthly data.</p>
+  {/if}
+</section>
+
+{#if data.analytics?.dist_stats}
+  <section class="stats-block">
+    <h3>Distribution Stats</h3>
+    <table class="stats-table">
+      <tbody>
+        <tr
+          ><th>Count</th><td>{data.analytics.dist_stats.count}</td><th
+            >Neg Days %</th
+          ><td
+            >{(data.analytics.dist_stats.negative_share * 100).toFixed(1)}%</td
+          ></tr
+        >
+        <tr
+          ><th>Mean</th><td
+            >{(data.analytics.dist_stats.mean * 100).toFixed(3)}%</td
+          ><th>Std</th><td
+            >{(data.analytics.dist_stats.std * 100).toFixed(3)}%</td
+          ></tr
+        >
+        <tr
+          ><th>Skew</th><td>{data.analytics.dist_stats.skew?.toFixed(2)}</td><th
+            >Kurtosis</th
+          ><td>{data.analytics.dist_stats.kurtosis?.toFixed(2)}</td></tr
+        >
+        <tr
+          ><th>P5</th><td>{(data.analytics.dist_stats.p5 * 100).toFixed(2)}%</td
+          ><th>P50</th><td
+            >{(data.analytics.dist_stats.p50 * 100).toFixed(2)}%</td
+          ></tr
+        >
+        <tr
+          ><th>P95</th><td
+            >{(data.analytics.dist_stats.p95 * 100).toFixed(2)}%</td
+          ><th>Sortino</th><td
+            >{data.analytics.dist_stats.sortino?.toFixed(2)}</td
+          ></tr
+        >
+        <tr
+          ><th>Downside Dev</th><td
+            >{(data.analytics.dist_stats.downside_dev * 100).toFixed(3)}%</td
+          ><th></th><td></td></tr
+        >
+      </tbody>
+    </table>
+  </section>
+{/if}
+
+<section class="exports-all">
+  <h3>Data Exports</h3>
+  <div class="export-row">
+    <button onclick={exportDaily} disabled={!data.returns}
+      >Daily Returns CSV</button
+    >
+    <button
+      onclick={exportMonthly}
+      disabled={!data.analytics?.monthly_returns?.length}
+      >Monthly Returns CSV</button
+    >
+    <button
+      onclick={exportHistogram}
+      disabled={!data.analytics?.return_histogram?.bins?.length}
+      >Histogram CSV</button
+    >
+  </div>
 </section>
 
 <style>
@@ -225,17 +499,52 @@
   .returns-block {
     margin-bottom: 2.5rem;
   }
-  .spark {
+  .drawdown-block,
+  .rolling-block {
+    margin-bottom: 2.5rem;
+  }
+  .distribution-block,
+  .monthly-block {
+    margin-bottom: 2.5rem;
+  }
+  .stats-block,
+  .exports-all {
+    margin-bottom: 2.5rem;
+  }
+  .dd-table {
     width: 100%;
-    max-width: 640px;
-    height: auto;
-    stroke: #38bdf8;
-    fill: none;
-    stroke-width: 2;
+    border-collapse: collapse;
+    margin-top: 0.75rem;
+    font-size: 0.65rem;
   }
-  .spark path {
-    filter: drop-shadow(0 2px 4px rgba(56, 189, 248, 0.35));
+  .dd-table th,
+  .dd-table td {
+    padding: 0.4rem 0.5rem;
+    text-align: right;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.15);
   }
+  .dd-table th {
+    text-align: right;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    font-size: 0.55rem;
+    color: rgba(148, 163, 184, 0.7);
+  }
+  .dd-table td:first-child,
+  .dd-table th:first-child {
+    text-align: center;
+  }
+  .dd-table td.neg {
+    color: #f87171;
+    font-variant-numeric: tabular-nums;
+  }
+  .rolling-grid {
+    display: grid;
+    gap: 1.5rem;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  }
+  /* removed unused .spark styles */
   .analysis {
     margin-top: 1.25rem;
     display: grid;
@@ -286,5 +595,51 @@
   .empty {
     font-size: 0.65rem;
     color: rgba(148, 163, 184, 0.55);
+  }
+  .banner.warn {
+    background: rgba(234, 179, 8, 0.12);
+    border-color: rgba(234, 179, 8, 0.5);
+  }
+  .errs {
+    margin: 0.5rem 0 0;
+    padding-left: 1.1rem;
+    font-size: 0.6rem;
+  }
+  .stats-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.65rem;
+  }
+  .stats-table th {
+    text-align: left;
+    padding: 0.3rem 0.4rem;
+    font-weight: 600;
+    color: rgba(148, 163, 184, 0.8);
+  }
+  .stats-table td {
+    padding: 0.3rem 0.4rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .export-row {
+    margin-top: 0.6rem;
+    display: flex;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+  button {
+    background: #1e293b;
+    border: 1px solid #334155;
+    color: #e2e8f0;
+    padding: 0.4rem 0.75rem;
+    border-radius: 0.5rem;
+    font-size: 0.6rem;
+    cursor: pointer;
+  }
+  button:hover:enabled {
+    background: #0f172a;
+  }
+  button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
 </style>

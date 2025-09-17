@@ -8,7 +8,7 @@ import type {
   EquityCurve,
   DailyReturns
 } from './types';
-import type { CatalogManifest, StrategyAnalysis } from './types';
+import type { CatalogManifest, StrategyAnalysis, StrategyAnalytics } from './types';
 
 const API_BASE_PATH = '/api';
 
@@ -83,6 +83,10 @@ export async function getStrategyAnalysis(fetcher: typeof fetch, exprHash: strin
   return request(fetcher, `/strategies/${exprHash}/analysis`);
 }
 
+export async function getStrategyAnalytics(fetcher: typeof fetch, exprHash: string, window: number = 252): Promise<StrategyAnalytics> {
+  return request(fetcher, `/strategies/${exprHash}/analytics?window=${window}`);
+}
+
 export interface PanelSliceParams {
   start?: string;
   end?: string;
@@ -148,5 +152,75 @@ export async function listStrategyArtifacts(fetcher: typeof fetch): Promise<Arti
 // Catalog aggregation (optional backend endpoint e.g. /catalog/manifest)
 export async function getCatalogManifest(fetcher: typeof fetch): Promise<CatalogManifest> {
   return request(fetcher, '/catalog/manifest');
+}
+
+// Control API additions
+import type { ControlTask, ControlJob, ControlJobLogs, ControlCSVFile, ControlFileEntry, ControlModeList, ControlMetricInfo } from './types';
+
+export async function listControlTasks(fetcher: typeof fetch): Promise<ControlTask[]> {
+  return request(fetcher, '/control/tasks');
+}
+
+export async function runControlTask(fetcher: typeof fetch, taskId: string, params: Record<string, any>): Promise<ControlJob> {
+  return request(fetcher, `/control/tasks/${taskId}/run`, {
+    method: 'POST',
+    body: JSON.stringify({ params })
+  });
+}
+
+export async function listControlJobs(fetcher: typeof fetch): Promise<ControlJob[]> {
+  return request(fetcher, '/control/jobs');
+}
+
+export async function getControlJob(fetcher: typeof fetch, jobId: string): Promise<ControlJob> {
+  return request(fetcher, `/control/jobs/${jobId}`);
+}
+
+export async function getControlJobLogs(fetcher: typeof fetch, jobId: string): Promise<ControlJobLogs> {
+  return request(fetcher, `/control/jobs/${jobId}/logs`);
+}
+
+export async function cancelControlJob(fetcher: typeof fetch, jobId: string): Promise<ControlJob> {
+  return request(fetcher, `/control/jobs/${jobId}/cancel`, { method: 'POST' });
+}
+
+export async function listControlCSVs(fetcher: typeof fetch): Promise<ControlCSVFile[]> {
+  return request(fetcher, '/control/datasets/csv');
+}
+
+export interface ControlMeta { dev_mode: boolean; version: string; git_commit?: string | null; data_version?: string | null; quant_core_root?: string | null; artifacts_root?: string | null }
+export async function getControlMeta(fetcher: typeof fetch): Promise<ControlMeta> {
+  return request(fetcher, '/control/meta');
+}
+
+// Listing endpoints
+export async function listRunsDB(fetcher: typeof fetch): Promise<ControlFileEntry[]> { return request(fetcher, '/control/list/runsdb'); }
+export async function listSignalFiles(fetcher: typeof fetch): Promise<ControlFileEntry[]> { return request(fetcher, '/control/list/signals'); }
+export async function listReturnFiles(fetcher: typeof fetch): Promise<ControlFileEntry[]> { return request(fetcher, '/control/list/returns'); }
+export async function listStrategyConfigs(fetcher: typeof fetch): Promise<ControlFileEntry[]> { return request(fetcher, '/control/list/strategies_cfg'); }
+export async function listModes(fetcher: typeof fetch): Promise<ControlModeList> { return request(fetcher, '/control/introspect/modes'); }
+export async function listMetrics(fetcher: typeof fetch): Promise<ControlMetricInfo[]> { return request(fetcher, '/control/introspect/metrics'); }
+export async function fetchConfigFile(fetcher: typeof fetch, path: string): Promise<{ path: string; content: string }> { return request(fetcher, `/control/config/file?path=${encodeURIComponent(path)}`); }
+export async function listGenericConfigs(fetcher: typeof fetch): Promise<ControlFileEntry[]> { return request(fetcher, '/control/list/configs'); }
+
+// Data browser endpoints
+export interface DomainMeta { domain: string; rows: number; cols: number; type: string; features: string[] }
+export interface DomainsResponse { domains: DomainMeta[]; skipped: { domain?: string; reason?: string }[] }
+export async function listDataDomains(fetcher: typeof fetch, refresh = false): Promise<DomainsResponse> {
+  return request(fetcher, `/control/data/domains${refresh ? '?refresh=1' : ''}`);
+}
+export interface DomainSample { domain: string; columns: string[]; rows: Record<string, any>[] }
+export async function getDomainSample(fetcher: typeof fetch, domain: string, limit = 50): Promise<DomainSample> {
+  return request(fetcher, `/control/data/sample?domain=${encodeURIComponent(domain)}&limit=${limit}`);
+}
+export interface DataFileEntry { path: string; kind: string; size: number; mtime: number }
+export async function listDataFiles(fetcher: typeof fetch): Promise<DataFileEntry[]> {
+  return request(fetcher, '/control/data/files');
+}
+export interface FilePreview { path: string; kind: string; columns?: string[]; rows?: Record<string, any>[]; text?: string }
+export async function previewDataFile(fetcher: typeof fetch, path: string, limit = 50, table?: string): Promise<FilePreview> {
+  const qs = new URLSearchParams({ path, limit: String(limit) });
+  if (table) qs.set('table', table);
+  return request(fetcher, `/control/data/file/preview?${qs.toString()}`);
 }
 

@@ -45,6 +45,23 @@ Disabled (return 501) routes: `/api/backtest`, `/api/jobs/*`, `/api/broker/*`.
 
 > NOTE: The manifest currently stores `kind` by singularizing the directory name naïvely; `strategies` may appear as `strategie`. This will be normalized in a later patch.
 
+### Two-System Architecture Reminder
+
+This adapter **only reads** externally produced research artifacts. All generation of:
+
+| Artifact Type                                      | Produced Here?            | Source (Expected)                  |
+| -------------------------------------------------- | ------------------------- | ---------------------------------- |
+| Strategy backtests / equity curves                 | ❌                        | quant core pipelines / runs DB     |
+| DSL expression generation                          | ❌                        | quant core (AI / search modules)   |
+| Model training (alpha, ML)                         | ❌                        | quant core training scripts        |
+| Datasets (feature/label parquet)                   | ❌                        | quant core ingestion + build steps |
+| Manifests (artifact inventory)                     | ❌                        | quant core build / CI job          |
+| Visualization analytics (drawdowns, rolling stats) | ✅ (computed transiently) | Derived on-the-fly                 |
+
+If a feature requires _producing_ or _mutating_ research state, implement it upstream in the quant core repo and expose only the resulting artifacts or a thin API surface here.
+
+Never add heavy backtest loops, AI generation, or training logic to this adapter; that would violate the separation-of-concerns contract and risk performance / security regressions.
+
 ## Environment Variables
 
 The service honours the following variables (defaults shown):
@@ -160,3 +177,67 @@ artifact manifest consumed here.
 | Artifacts     | ETag support + pagination for large lists      |
 | Security      | Per-route key scoping (optional)               |
 | Observability | Basic request metrics and cache headers        |
+
+## Control API (Optional Local Orchestration)
+
+A minimal "control" layer is available to trigger _whitelisted_ quant-core related
+commands (export artifacts, etc.) directly from the existing FastAPI process **without**
+introducing a second microservice. This remains optional and is primarily for local
+operator convenience / a future UI control panel.
+
+Key design constraints:
+
+- Whitelist only (no arbitrary shell): registry in `app/control/registry.py`.
+- Subprocess isolation: each task runs via `python -m <module>` to avoid leaking state.
+- In-memory job ledger (non-persistent); safe for local dev.
+- Read-only guard relaxed only for routes under `/api/control/*`.
+
+### Endpoints
+
+| Method | Route                             | Description                              |
+| ------ | --------------------------------- | ---------------------------------------- |
+| GET    | /api/control/tasks                | List available tasks & parameter schemas |
+| POST   | /api/control/tasks/{task_id}/run  | Launch a task (returns job id)           |
+| GET    | /api/control/jobs                 | List jobs                                |
+| GET    | /api/control/jobs/{job_id}        | Job detail + status                      |
+| GET    | /api/control/jobs/{job_id}/logs   | Full stdout/stderr (capped)              |
+| POST   | /api/control/jobs/{job_id}/cancel | Attempt cancellation                     |
+
+### Example: Export Artifacts (Synthetic)
+
+```powershell
+# List tasks
+Invoke-RestMethod http://127.0.0.1:8000/api/control/tasks
+
+# Run export (synthetic strategies)
+$job = Invoke-RestMethod -Method POST \
+  -Uri http://127.0.0.1:8000/api/control/tasks/export_artifacts/run \
+  -Body (@{ params = @{ synthetic = $true; limit = 5; out_root = 'C:/dev/quant_generated' } } | ConvertTo-Json) \
+  -ContentType 'application/json'
+
+# Poll status
+Invoke-RestMethod http://127.0.0.1:8000/api/control/jobs/$($job.id)
+
+# Fetch logs
+Invoke-RestMethod http://127.0.0.1:8000/api/control/jobs/$($job.id)/logs
+```
+
+### Adding a New Task
+
+1. Edit `app/control/registry.py`.
+2. Create a new `TaskDef` with a builder translating params to CLI args.
+3. Restart the server; it appears in `/api/control/tasks`.
+
+### Limitations & Future Hardening
+
+| Aspect      | Current                 | Planned                               |
+| ----------- | ----------------------- | ------------------------------------- |
+| Auth        | None (local only)       | Header token / role gating            |
+| Persistence | Volatile in-process     | SQLite / file-backed job index        |
+| Streaming   | Polling only            | WebSocket incremental log stream      |
+| Scheduling  | Manual trigger          | Cron-like / dependency graph          |
+| Concurrency | Fixed small worker pool | Dynamic scaling / queue depth metrics |
+
+Stay mindful of the two-system separation: _do not_ extend the control API into
+heavy backtest loops or AI model training here; keep those responsibilities in the
+core engine and expose only derived artifacts or coarse-grained triggers.

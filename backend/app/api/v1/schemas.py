@@ -276,6 +276,68 @@ class StrategyAnalysis(BaseModel):
     token_count: int
 
 
+# ---------------- Strategy Analytics (drawdowns & rolling) ---------------
+
+
+class DrawdownEvent(BaseModel):
+    """Single drawdown episode from peak to trough (and optional recovery)."""
+
+    start: date
+    trough: date
+    recovery: date | None = None
+    depth: float = Field(..., description="Depth of drawdown (negative fraction).")
+    length: int = Field(
+        ...,
+        description="Total days from start to recovery (or last observation if unrecovered).",
+    )
+    days_to_trough: int
+
+
+class StrategyAnalytics(BaseModel):
+    """Aggregated time-series analytics for a strategy.
+
+    Provided as a single payload to minimise round trips.
+    All series are aligned by date index where applicable.
+    """
+
+    expr_hash: str
+    as_of: datetime
+    # Drawdown series (same length as equity if available)
+    dd_dates: list[date] = Field(default_factory=list)
+    drawdowns: list[float] = Field(
+        default_factory=list,
+        description="Per-date drawdown values (negative fractions).",
+    )
+    top_drawdowns: list[DrawdownEvent] = Field(default_factory=list)
+    # Rolling metrics (annualised where applicable) using a 252-day window default
+    window: int | None = None
+    rolling_return: list[float] = Field(
+        default_factory=list, description="Trailing annualised return."
+    )
+    rolling_vol: list[float] = Field(
+        default_factory=list, description="Trailing annualised volatility."
+    )
+    rolling_sharpe: list[float] = Field(
+        default_factory=list, description="Trailing annualised Sharpe (return / vol)."
+    )
+    # Phase 2 additions
+    monthly_returns: list[dict] = Field(
+        default_factory=list,
+        description="List of {year, month, return} (geometric monthly returns).",
+    )
+    return_histogram: dict | None = Field(
+        default=None,
+        description="Histogram of daily returns: {bins:[{start,end,count}], min,max,bucket_size,total}.",
+    )
+    # Phase 3 additions: distribution summary statistics
+    dist_stats: dict | None = Field(
+        default=None,
+        description=(
+            "Distribution statistics over daily returns: {mean,std,skew,kurtosis,p5,p50,p95,count,negative_share,downside_dev,sortino}."
+        ),
+    )
+
+
 __all__ = [
     "AggregateMetrics",
     "BacktestRequest",

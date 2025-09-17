@@ -40,6 +40,8 @@ from .schemas import (
     StrategyMetrics,
     StrategySummary,
     StrategyAnalysis,
+    StrategyAnalytics,
+    DrawdownEvent,
 )
 
 from app.engine_adapter import (
@@ -66,6 +68,8 @@ from .panel import load_panel_slice
 from app.artifacts.manifest import load_manifest
 from pathlib import Path
 from collections import Counter
+import math
+import hashlib
 
 router = APIRouter()
 
@@ -340,9 +344,39 @@ async def get_equity_curve(expr_hash: str, settings: SettingsDep) -> EquityCurve
     if json_curve:
         return json_curve
     curve = SAMPLE_EQUITY_CURVES.get(expr_hash)
-    if not curve:
-        raise HTTPException(status_code=404, detail="Equity curve not found")
-    return curve
+    if curve:
+        return curve
+    # Synthetic fallback: deterministic pseudo equity series based on hash
+    seed = int(hashlib.sha256(expr_hash.encode()).hexdigest()[:8], 16)
+    days = 260
+    # Map seed to drift/vol (annualised assumptions) then convert to daily
+    rng_drift = ((seed >> 8) & 0xFFFF) / 0xFFFF  # 0..1
+    rng_vol = ((seed >> 16) & 0xFFFF) / 0xFFFF
+    ann_ret = 0.05 + 0.10 * (rng_drift - 0.5)  # ±5% around 5%
+    ann_vol = 0.12 + 0.06 * (rng_vol - 0.5)  # ±3% around 12%
+    daily_mu = ann_ret / 252
+    daily_sigma = ann_vol / math.sqrt(252)
+    eq = [1.0]
+    # simple deterministic pseudo-random using linear congruential generator
+    a = 1664525
+    c = 1013904223
+    m = 2**32
+    x = seed
+    for _ in range(days):
+        x = (a * x + c) % m
+        z = (x / m) * 2 - 1  # uniform -1..1
+        r = daily_mu + daily_sigma * z * 0.7  # scale to keep moderate
+        eq.append(eq[-1] * (1 + r))
+    dates = [
+        (NOW.date() - timedelta(days=days - i)).isoformat() for i in range(1, days + 1)
+    ]
+    synthetic = EquityCurve(
+        expr_hash=expr_hash,
+        base_currency="SEK",
+        dates=dates,
+        equity=[round(v, 6) for v in eq[1:]],
+    )
+    return synthetic
 
 
 @router.get(
@@ -365,9 +399,15 @@ async def get_daily_returns(expr_hash: str, settings: SettingsDep) -> DailyRetur
     if json_ret:
         return json_ret
     payload = SAMPLE_RETURNS.get(expr_hash)
-    if not payload:
-        raise HTTPException(status_code=404, detail="Returns not found")
-    return payload
+    if payload:
+        return payload
+    # Derive from synthetic equity fallback
+    curve = await get_equity_curve(expr_hash, settings)
+    if curve and len(curve.equity) > 1:
+        eq = curve.equity
+        returns = [round(eq[i] / eq[i - 1] - 1, 6) for i in range(1, len(eq))]
+        return DailyReturns(expr_hash=expr_hash, dates=curve.dates[1:], returns=returns)
+    raise HTTPException(status_code=404, detail="Returns not found")
 
 
 @router.get(
@@ -555,6 +595,270 @@ async def strategy_analysis(expr_hash: str, settings: SettingsDep) -> StrategyAn
         primitives_used=primitives_used,
         expr_length=expr_length,
         token_count=token_count,
+    )
+
+
+# --------------------------- Strategy analytics (drawdowns / rolling) -----
+
+
+def _compute_drawdowns(dates: list[date], equity: list[float]):
+    drawdowns: list[float] = []
+    peak = equity[0] if equity else 1.0
+    events: list[DrawdownEvent] = []
+    current_start_idx: int | None = None
+    trough_idx: int | None = None
+    trough_dd = 0.0
+    for i, v in enumerate(equity):
+        if v > peak:
+            # If exiting a drawdown, close event
+            if current_start_idx is not None:
+                # recovery date is dates[i] (new peak day)
+                events.append(
+                    DrawdownEvent(
+                        start=dates[current_start_idx],
+                        trough=dates[trough_idx],  # type: ignore[arg-type]
+                        recovery=dates[i],
+                        depth=trough_dd,
+                        length=(i - current_start_idx),
+                        days_to_trough=(trough_idx - current_start_idx),  # type: ignore[operator]
+                    )
+                )
+                current_start_idx = None
+                trough_idx = None
+                trough_dd = 0.0
+            peak = v
+        dd = v / peak - 1.0
+        drawdowns.append(dd)
+        if dd < 0:
+            if current_start_idx is None:
+                current_start_idx = i
+                trough_idx = i
+                trough_dd = dd
+            else:
+                if dd < trough_dd:
+                    trough_dd = dd
+                    trough_idx = i
+    # If still in drawdown at end, close incomplete event without recovery
+    if current_start_idx is not None and trough_idx is not None:
+        events.append(
+            DrawdownEvent(
+                start=dates[current_start_idx],
+                trough=dates[trough_idx],
+                recovery=None,
+                depth=trough_dd,
+                length=(len(equity) - current_start_idx - 1),
+                days_to_trough=(trough_idx - current_start_idx),
+            )
+        )
+    # Rank events by depth (most negative first)
+    events.sort(key=lambda e: e.depth)
+    return drawdowns, events
+
+
+def _rolling_window(values: list[float], window: int, fn):
+    out: list[float] = [float("nan")] * len(values)
+    if window <= 1 or len(values) < window:
+        return out
+    for i in range(window - 1, len(values)):
+        seg = values[i - window + 1 : i + 1]
+        out[i] = fn(seg)
+    return out
+
+
+@router.get(
+    "/strategies/{expr_hash}/analytics",
+    response_model=StrategyAnalytics,
+    tags=["strategies"],
+    summary="Strategy analytics (drawdowns & rolling)",
+)
+async def strategy_analytics(expr_hash: str, settings: SettingsDep, window: int = 252, top: int = 5) -> StrategyAnalytics:  # type: ignore[assignment]
+    if window <= 2:
+        window = 252
+    # Acquire equity curve (adapter / providers / sample)
+    if not settings.disable_adapter and adapter_available():
+        curve = await fetch_equity_curve(expr_hash)
+    else:
+        curve = None
+    if curve is None:
+        curve = json_equity_curve(expr_hash) or SAMPLE_EQUITY_CURVES.get(expr_hash)
+    if curve is None:
+        # use synthetic fallback (reuse logic from get_equity_curve)
+        curve = await get_equity_curve(expr_hash, settings)
+    dates = curve.dates
+    equity = curve.equity
+    if not equity:
+        return StrategyAnalytics(expr_hash=expr_hash, as_of=NOW, window=window)
+    drawdowns, events = _compute_drawdowns(dates, equity)
+    top_events = events[:top]
+    # Derive daily returns from equity for rolling metrics
+    rets = []
+    for i in range(1, len(equity)):
+        r = equity[i] / equity[i - 1] - 1
+        rets.append(r)
+    # Pad to align lengths (first return is at index 1)
+    daily = [float("nan")] + rets
+
+    # Annualisation factor approximation (252 trading days)
+    def annualised_return(seg):
+        cum = 1.0
+        for x in seg:
+            cum *= 1 + x
+        n = len(seg)
+        # geometric annualised.
+        return cum ** (252 / n) - 1 if n else float("nan")
+
+    def annualised_vol(seg):
+        import math
+
+        if len(seg) < 2:
+            return float("nan")
+        mean = sum(seg) / len(seg)
+        var = sum((x - mean) ** 2 for x in seg) / (len(seg) - 1)
+        return (var**0.5) * (252**0.5)
+
+    rolling_ret = _rolling_window(daily, window, annualised_return)
+    rolling_vol = _rolling_window(daily, window, annualised_vol)
+    rolling_sharpe = [
+        (
+            (r / v)
+            if (i < len(rolling_ret) and i < len(rolling_vol) and v and v == v)
+            else float("nan")
+        )
+        for i, (r, v) in enumerate(zip(rolling_ret, rolling_vol))
+    ]
+    # Monthly returns (geometric)
+    from collections import defaultdict
+
+    monthly_groups: dict[tuple[int, int], list[float]] = defaultdict(list)
+    for d, r in zip(dates[1:], rets):  # align with returns indexing
+        monthly_groups[(d.year, d.month)].append(r)
+    monthly_returns: list[dict] = []
+    for (y, m), seg in sorted(monthly_groups.items()):
+        cum = 1.0
+        for x in seg:
+            cum *= 1 + x
+        monthly_returns.append({"year": y, "month": m, "return": cum - 1})
+
+    # Return histogram on daily returns (exclude first NaN-like position)
+    hist_bins: list[dict] = []
+    hist_meta: dict | None = None
+    if rets:
+        vals = rets[:]  # copy
+        vals_sorted = sorted(vals)
+        n = len(vals_sorted)
+        if n > 1:
+            import math
+
+            q1 = vals_sorted[int(0.25 * (n - 1))]
+            q3 = vals_sorted[int(0.75 * (n - 1))]
+            iqr = q3 - q1
+            bin_width = (2 * iqr / (n ** (1 / 3))) if iqr > 0 else 0
+            if not bin_width or bin_width <= 0:
+                # fallback width ~0.25% absolute
+                bin_width = 0.0025
+            data_min = min(vals_sorted)
+            data_max = max(vals_sorted)
+            span = data_max - data_min or 1e-9
+            bins_calc = max(5, min(80, int(span / bin_width)))
+            bucket_size = span / bins_calc if bins_calc else span
+            # Build bins
+            counts = [0] * bins_calc
+            for v in vals_sorted:
+                idx = int((v - data_min) / span * bins_calc)
+                if idx == bins_calc:  # right edge inclusion
+                    idx -= 1
+                counts[idx] += 1
+            for i, c in enumerate(counts):
+                start = data_min + (i / bins_calc) * span
+                end = data_min + ((i + 1) / bins_calc) * span
+                hist_bins.append({"start": start, "end": end, "count": c})
+            hist_meta = {
+                "min": data_min,
+                "max": data_max,
+                "bucket_size": bucket_size,
+                "total": n,
+            }
+
+    # Distribution summary statistics over daily returns (rets)
+    dist_stats: dict | None = None
+    if rets:
+        import math
+
+        n_rets = len(rets)
+        mean = sum(rets) / n_rets
+        var = sum((x - mean) ** 2 for x in rets) / (n_rets - 1) if n_rets > 1 else 0.0
+        std = math.sqrt(var)
+        # higher moments (sample-based)
+        if std > 0:
+            skew = (
+                sum(((x - mean) / std) ** 3 for x in rets) * (n_rets / ((n_rets - 1)))
+                if n_rets > 2
+                else float("nan")
+            )
+            kurt = (
+                sum(((x - mean) / std) ** 4 for x in rets) * (n_rets / ((n_rets - 1)))
+                if n_rets > 3
+                else float("nan")
+            ) - 3
+        else:
+            skew = float("nan")
+            kurt = float("nan")
+        sorted_rets = sorted(rets)
+
+        def _pct(p: float):
+            if n_rets == 1:
+                return sorted_rets[0]
+            k = (n_rets - 1) * p
+            f = math.floor(k)
+            c = math.ceil(k)
+            if f == c:
+                return sorted_rets[int(k)]
+            d0 = sorted_rets[f] * (c - k)
+            d1 = sorted_rets[c] * (k - f)
+            return d0 + d1
+
+        p5 = _pct(0.05)
+        p50 = _pct(0.50)
+        p95 = _pct(0.95)
+        neg = [x for x in rets if x < 0]
+        negative_share = len(neg) / n_rets
+        downside_dev = 0.0
+        if neg:
+            downside_dev = (sum(x * x for x in neg) / len(neg)) ** 0.5
+        # Sortino (annualised return / annualised downside volatility)
+        # Annualised return approx using mean * 252 (simple) vs geometric; we use mean*252 for speed here.
+        ann_ret_simple = mean * 252
+        ann_downside_vol = downside_dev * (252**0.5)
+        sortino = (
+            ann_ret_simple / ann_downside_vol if ann_downside_vol else float("nan")
+        )
+        dist_stats = {
+            "mean": mean,
+            "std": std,
+            "skew": skew,
+            "kurtosis": kurt,
+            "p5": p5,
+            "p50": p50,
+            "p95": p95,
+            "count": n_rets,
+            "negative_share": negative_share,
+            "downside_dev": downside_dev,
+            "sortino": sortino,
+        }
+
+    return StrategyAnalytics(
+        expr_hash=expr_hash,
+        as_of=NOW,
+        dd_dates=dates,
+        drawdowns=drawdowns,
+        top_drawdowns=top_events,
+        window=window,
+        rolling_return=rolling_ret,
+        rolling_vol=rolling_vol,
+        rolling_sharpe=rolling_sharpe,
+        monthly_returns=monthly_returns,
+        return_histogram=({"bins": hist_bins, **hist_meta} if hist_meta else None),
+        dist_stats=dist_stats,
     )
 
 

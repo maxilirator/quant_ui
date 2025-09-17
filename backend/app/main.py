@@ -23,14 +23,15 @@ if settings.quant_core_root:
 
 
 READ_ONLY_ALLOWED_METHODS = {"GET", "HEAD", "OPTIONS", "WEBSOCKET"}
+CONTROL_PREFIX = "/api/control"
 
 
 @app.middleware("http")
 async def read_only_guard(request: Request, call_next):  # pragma: no cover simple logic
     method = request.method.upper()
-    # Skip health root POST blockers only for allowed methods
-    if method not in READ_ONLY_ALLOWED_METHODS:
-        # Allow explicit POST on /health if ever needed? Currently disallow.
+    path = request.url.path
+    # Allow control routes to use POST/other methods (they are explicitly whitelisted internally)
+    if not path.startswith(CONTROL_PREFIX) and method not in READ_ONLY_ALLOWED_METHODS:
         raise HTTPException(
             status_code=405, detail="Read-only mode: method not allowed"
         )
@@ -52,3 +53,8 @@ async def read_root() -> dict[str, str]:
 
 
 app.include_router(api_router, prefix="/api")
+
+# Import and mount control router after main API include to ensure middleware sees prefix
+from app.api.v1.control import router as control_router  # noqa: E402
+
+app.include_router(control_router, prefix="/api")

@@ -45,6 +45,31 @@ export interface DailyReturns {
   returns: number[];
 }
 
+// Strategy analytics (drawdowns & rolling metrics)
+export interface DrawdownEvent {
+  start: string;
+  trough: string;
+  recovery?: string | null;
+  depth: number; // negative fraction
+  length: number; // days total
+  days_to_trough: number;
+}
+
+export interface StrategyAnalytics {
+  expr_hash: string;
+  as_of: string;
+  dd_dates: string[];
+  drawdowns: number[];
+  top_drawdowns: DrawdownEvent[];
+  window?: number | null;
+  rolling_return: number[];
+  rolling_vol: number[];
+  rolling_sharpe: number[];
+  monthly_returns: { year: number; month: number; return: number }[];
+  return_histogram?: { bins: { start: number; end: number; count: number }[]; min: number; max: number; bucket_size: number; total: number } | null;
+  dist_stats?: { mean: number; std: number; skew: number; kurtosis: number; p5: number; p50: number; p95: number; count: number; negative_share: number; downside_dev: number; sortino: number } | null;
+}
+
 export interface AggregateMetrics {
   sharpe_distribution: number[];
   drawdown_distribution: number[];
@@ -106,61 +131,13 @@ export interface ArtifactEntry { file: string; sha256: string; size: number; cre
 export interface ArtifactManifest { generated_at: string; git_commit?: string | null; data_version?: string | null; entries: ArtifactEntry[]; version: number }
 export interface PanelSliceResponse { rows: Array<Record<string, unknown>>; columns: string[]; total_rows: number; downsampled: boolean }
 
-// ---------------- Catalog Aggregation (proposed) ----------------
-// The backend can optionally expose a single JSON (e.g. GET /catalog/manifest)
-// that pre-joins feature catalog, primitive catalog, strategy tag stats and
-// artifact counts to minimise round trips for the catalog UI. Schema below.
-
-export interface CatalogArtifactCounts {
-  models: number;
-  reports: number;
-  signals: number;
-  logs: number;
-  datasets: number;
-  strategies: number;
-}
-
-export interface CatalogStrategyTagStat { tag: string; count: number }
-
-export interface CatalogDatasetEntry { file: string; size: number; created: string }
-
-export interface CatalogManifest {
-  generated_at: string;
-  git_commit?: string | null;
-  data_version?: string | null;
-  feature_count: number;
-  primitive_count: number;
-  features: FeatureDefinition[]; // optional full list
-  primitives: PrimitiveDefinition[]; // optional full list
-  strategy_tags: CatalogStrategyTagStat[]; // aggregated tag frequencies
-  artifacts: CatalogArtifactCounts; // counts per artifact kind
-  datasets?: CatalogDatasetEntry[]; // optional lightweight dataset listing
-  version: number; // bump when schema changes
-}
-
-/*
-Proposed backend endpoint: GET /catalog/manifest
-Example JSON:
-{
-  "generated_at": "2025-09-16T10:12:03Z",
-  "git_commit": "abc1234",
-  "data_version": "20250915_fund_v2",
-  "feature_count": 128,
-  "primitive_count": 42,
-  "features": [{"name":"close","description":"Daily close","group":"price"}, ...],
-  "primitives": [{"name":"zscore","description":"Standard score","arity":1,"category":"transform"}, ...],
-  "strategy_tags": [{"tag":"momentum","count":57},{"tag":"mean-reversion","count":31}],
-  "artifacts": {"models":12,"reports":4,"signals":27,"logs":15,"datasets":6,"strategies":90},
-  "datasets": [{"file":"datasets/panel/bars_eod_20250915.parquet","size":1048576,"created":"2025-09-15T22:00:01Z"}],
-  "version": 1
-}
-
-Construction guidance (backend):
-1. Load feature & primitive catalogs (existing endpoints or direct sources).
-2. Scan strategy metadata store (or manifest) to compute tag frequencies.
-3. Load artifacts/manifest.json and aggregate counts by kind.
-4. Optionally list dataset artifacts (kind == 'dataset') with size & created timestamp.
-5. Provide counts (feature_count, primitive_count) even if omitting full lists for size.
-6. Set version=1 now; bump when schema changes to allow client conditional logic.
-*/
+// Control API types
+export interface ControlTaskParam { name: string; type: string; required: boolean; default?: any; description?: string | null }
+export interface ControlTask { id: string; summary: string; category: string; params: ControlTaskParam[] }
+export interface ControlJob { id: string; task_id: string; status: string; created_at: number; started_at?: number | null; finished_at?: number | null; exit_code?: number | null; error?: string | null; stdout_tail: string[]; stderr_tail: string[]; pid?: number | null }
+export interface ControlJobLogs { stdout: string[]; stderr: string[]; truncated: boolean }
+export interface ControlCSVFile { path: string; size: number; mtime: number }
+export interface ControlFileEntry { path: string; name: string; size: number; mtime: number }
+export interface ControlModeList { modes: string[]; default: string }
+export interface ControlMetricInfo { key: string; label: string; description: string }
 
