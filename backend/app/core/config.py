@@ -41,6 +41,8 @@ class Settings(BaseSettings):
         default=None, alias="CURVES_ROOT"
     )  # curves/*.json or equity/*.json
     dev_mode: bool = Field(default=False, alias="DEV_MODE")
+    # Optional explicit Python interpreter for quant core tasks (overrides sys.executable for job subprocesses)
+    core_python: str | None = Field(default=None, alias="CORE_PYTHON")
 
     model_config = SettingsConfigDict(
         env_prefix="QUANT_", env_file=".env", extra="ignore"
@@ -87,6 +89,29 @@ class Settings(BaseSettings):
         if dev_env is not None:
             val = dev_env.lower() in {"1", "true", "yes", "on"}
             object.__setattr__(self, "dev_mode", val)
+
+        # Resolve core python interpreter precedence:
+        # 1. QUANT_CORE_PYTHON
+        # 2. CORE_PYTHON (no prefix)
+        # 3. Provided field value
+        # 4. Auto-detect inside quant_core_root (.venv or venv) if exists
+        py_prefixed = os.getenv("QUANT_CORE_PYTHON") or os.getenv("CORE_PYTHON")
+        chosen_py = py_prefixed or self.core_python
+        if not chosen_py and getattr(self, "quant_core_root", None):
+            root = getattr(self, "quant_core_root")
+            # Windows & POSIX candidates
+            candidates = [
+                f"{root}/.venv/Scripts/python.exe",
+                f"{root}/.venv/bin/python",
+                f"{root}/venv/Scripts/python.exe",
+                f"{root}/venv/bin/python",
+            ]
+            for c in candidates:
+                if os.path.exists(c):
+                    chosen_py = c
+                    break
+        if chosen_py:
+            object.__setattr__(self, "core_python", chosen_py)
 
 
 @lru_cache

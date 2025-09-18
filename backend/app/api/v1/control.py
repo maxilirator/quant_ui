@@ -14,6 +14,7 @@ from app.control.registry import list_tasks, get_task
 from app.core.config import get_settings
 from pathlib import Path
 import os
+import yaml  # type: ignore
 from app.control.jobs import get_manager
 import json
 import sqlite3
@@ -51,6 +52,68 @@ class RegistryError(Exception):  # fallback placeholder if core not available
 
 
 router = APIRouter(tags=["control"], prefix="/control")
+
+# -------- Curated root resolution (unify data location) --------
+_DATA_YAML_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def _load_data_yaml(path: Path) -> dict:
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return {}
+    key = str(path.resolve())
+    mtime = st.st_mtime
+    cached = _DATA_YAML_CACHE.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception:
+        data = {}
+    _DATA_YAML_CACHE[key] = (mtime, data)
+    return data
+
+
+def _resolve_curated_root(settings) -> Path:
+    candidates: list[Path] = []
+    # 1. Explicit data_root setting
+    if getattr(settings, "data_root", None):
+        candidates.append(Path(settings.data_root))  # type: ignore[arg-type]
+    # 2. Env override
+    env_cur = os.getenv("QUANT_CURATED_DIR")
+    if env_cur:
+        candidates.append(Path(env_cur))
+    # 3. Core root default + core data.yaml
+    if settings.quant_core_root:
+        core_root = Path(settings.quant_core_root)
+        candidates.append(core_root / "data_curated")
+        core_yaml = core_root / "configs" / "data.yaml"
+        core_cfg = _load_data_yaml(core_yaml)
+        cur_dir = core_cfg.get("curated_dir")
+        if cur_dir:
+            p = Path(cur_dir)
+            if not p.is_absolute():
+                p = (core_root / cur_dir).resolve()
+            candidates.append(p)
+    # 4. Local data.yaml
+    local_yaml = Path("configs") / "data.yaml"
+    loc_cfg = _load_data_yaml(local_yaml)
+    if loc_cfg.get("curated_dir"):
+        p = Path(loc_cfg["curated_dir"])
+        if not p.is_absolute():
+            p = Path(loc_cfg["curated_dir"]).resolve()
+        candidates.append(p)
+    # 5. Fallback
+    candidates.append(Path("data_curated").resolve())
+    for c in candidates:
+        try:
+            if c.exists():
+                return c
+        except Exception:
+            continue
+    return candidates[-1]
 
 
 class TaskParam(BaseModel):
@@ -128,7 +191,13 @@ async def run_task(task_id: str, req: RunRequest):
     mgr = get_manager()
     settings = get_settings()
     cwd = settings.quant_core_root if task.use_core_root_cwd else None
-    rec = mgr.run(task.id, task.module, args, cwd=cwd)
+    # Determine python interpreter: prefer settings.core_python when task wants core cwd
+    python_exe: str | None = None
+    if task.use_core_root_cwd:
+        settings = get_settings()
+        if getattr(settings, "core_python", None):
+            python_exe = settings.core_python
+    rec = mgr.run(task.id, task.module, args, cwd=cwd, python_exe=python_exe)
     return JobResponse(**rec.to_public())
 
 
@@ -180,11 +249,13 @@ class ControlMeta(BaseModel):
     data_version: str | None = None
     quant_core_root: str | None = None
     artifacts_root: str | None = None
+    curated_root: str | None = None
 
 
 @router.get("/meta", response_model=ControlMeta)
 async def control_meta():
     settings = get_settings()
+    curated = _resolve_curated_root(settings)
     return ControlMeta(
         dev_mode=settings.dev_mode,
         version=settings.version,
@@ -192,6 +263,71 @@ async def control_meta():
         data_version=settings.data_version,
         quant_core_root=settings.quant_core_root,
         artifacts_root=settings.artifacts_root,
+        curated_root=str(curated) if curated else None,
+    )
+
+
+class DebugConfig(BaseModel):
+    curated_root: str
+    candidates: list[str]
+    exists: list[bool]
+    data_yaml_local: dict
+    data_yaml_core: dict | None = None
+    core_python: str | None = None
+
+
+@router.get("/debug/config", response_model=DebugConfig)
+async def debug_config():
+    """Return detailed curated root resolution diagnostics for UI display.
+
+    This intentionally replays the resolution logic rather than importing
+    quant core helpers to avoid tight coupling; it mirrors _resolve_curated_root.
+    """
+    settings = get_settings()
+    # Reconstruct candidate list for transparency
+    candidates: list[Path] = []
+    data_yaml_local: dict = {}
+    data_yaml_core: dict | None = None
+    # 1 explicit data_root setting
+    if getattr(settings, "data_root", None):
+        candidates.append(Path(settings.data_root))  # type: ignore[arg-type]
+    env_cur = os.getenv("QUANT_CURATED_DIR")
+    if env_cur:
+        candidates.append(Path(env_cur))
+    if settings.quant_core_root:
+        core_root = Path(settings.quant_core_root)
+        candidates.append(core_root / "data_curated")
+        core_yaml = core_root / "configs" / "data.yaml"
+        data_yaml_core = _load_data_yaml(core_yaml)
+        cd = data_yaml_core.get("curated_dir") if data_yaml_core else None
+        if cd:
+            p = Path(cd)
+            if not p.is_absolute():
+                p = (core_root / cd).resolve()
+            candidates.append(p)
+    local_yaml = Path("configs") / "data.yaml"
+    data_yaml_local = _load_data_yaml(local_yaml)
+    ld = data_yaml_local.get("curated_dir")
+    if ld:
+        p = Path(ld)
+        if not p.is_absolute():
+            p = Path(ld).resolve()
+        candidates.append(p)
+    candidates.append(Path("data_curated").resolve())
+    resolved = _resolve_curated_root(settings)
+    exists = []
+    for c in candidates:
+        try:
+            exists.append(c.exists())
+        except Exception:
+            exists.append(False)
+    return DebugConfig(
+        curated_root=str(resolved),
+        candidates=[str(c) for c in candidates],
+        exists=exists,
+        data_yaml_local=data_yaml_local,
+        data_yaml_core=data_yaml_core,
+        core_python=getattr(settings, "core_python", None),
     )
 
 
@@ -482,26 +618,51 @@ class DomainsResponse(BaseModel):
 
 
 @router.get("/data/domains", response_model=DomainsResponse)
-async def data_domains(refresh: bool = False):
-    settings = get_settings()
-    curated = (
-        Path(settings.quant_core_root) / "data_curated"
-        if settings.quant_core_root
-        else Path("data_curated")
-    )
-    if not curated.exists():
-        raise HTTPException(status_code=404, detail="curated root not found")
-    try:
-        reg = _get_registry(curated)
-        if refresh:
-            # crude refresh by resetting module-level cache
-            import importlib
+async def data_domains(refresh: bool = False, debug: bool = False):
+    """Return curated data domain metadata.
 
-            regmod = importlib.import_module("src.data.registry")  # type: ignore
-            regmod._def_registry = None  # reset
+    Instead of propagating internal loader errors as 5xx (which break the UI),
+    this endpoint now degrades gracefully: on failure it returns an empty
+    domains list with a diagnostic in `skipped` so the frontend can surface
+    actionable feedback while remaining functional.
+    """
+    settings = get_settings()
+    curated = _resolve_curated_root(settings)
+    if not curated.exists():
+        return DomainsResponse(
+            domains=[],
+            skipped=[{"reason": "curated root not found", "path": str(curated)}],
+        )
+    try:
+        try:
             reg = _get_registry(curated)
-        reg.load_all()
-        metas = []
+        except HTTPException as e:  # import failure already wrapped
+            return DomainsResponse(
+                domains=[],
+                skipped=[{"reason": "registry import failed", "detail": str(e.detail)}],
+            )
+        if refresh:
+            import importlib, sys
+
+            try:
+                if "src.data.registry" in sys.modules:
+                    importlib.reload(sys.modules["src.data.registry"])  # type: ignore
+                regmod = importlib.import_module("src.data.registry")  # type: ignore
+                regmod._def_registry = None  # type: ignore[attr-defined]
+                reg = _get_registry(curated)
+            except Exception as e:  # pragma: no cover - defensive
+                return DomainsResponse(
+                    domains=[],
+                    skipped=[{"reason": "registry refresh failed", "detail": str(e)}],
+                )
+        try:
+            reg.load_all()
+        except RegistryError as e:  # type: ignore
+            # Loader-level structural failure; surface as skipped diagnostic
+            return DomainsResponse(
+                domains=[], skipped=[{"reason": "registry error", "detail": str(e)}]
+            )
+        metas: list[DomainMeta] = []
         for d in reg.list_domains():
             dm = reg.domain_meta(d) or {}
             metas.append(
@@ -514,9 +675,20 @@ async def data_domains(refresh: bool = False):
                 )
             )
         skipped = reg.skipped_domains()
+        # Optionally attach debug summary (counts) without altering schema (embed in skipped)
+        if debug:
+            skipped.append(
+                {
+                    "reason": "debug",
+                    "detail": f"domains={len(metas)} skipped={len(skipped)} curated_root={curated}",  # type: ignore[arg-type]
+                }
+            )
         return DomainsResponse(domains=metas, skipped=skipped)
-    except RegistryError as e:  # type: ignore
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:  # pragma: no cover - final safety net
+        # Last resort: never raise 500; represent as diagnostic line.
+        return DomainsResponse(
+            domains=[], skipped=[{"reason": "unexpected error", "detail": str(e)}]
+        )
 
 
 class DomainSample(BaseModel):
@@ -528,11 +700,7 @@ class DomainSample(BaseModel):
 @router.get("/data/sample", response_model=DomainSample)
 async def data_sample(domain: str, limit: int = 50):
     settings = get_settings()
-    curated = (
-        Path(settings.quant_core_root) / "data_curated"
-        if settings.quant_core_root
-        else Path("data_curated")
-    )
+    curated = _resolve_curated_root(settings)
     reg = _get_registry(curated)
     df = reg.load_all()
     # isolate columns belonging to domain + date,ticker
@@ -567,12 +735,14 @@ class FileListEntry(BaseModel):
 @router.get("/data/files", response_model=list[FileListEntry])
 async def data_files(max_results: int = 400):
     settings = get_settings()
-    roots = []
+    curated_root = _resolve_curated_root(settings)
+    roots = [curated_root]
     if settings.quant_core_root:
-        roots.append(Path(settings.quant_core_root) / "data_curated")
+        # ensure configs/artifacts from core root still scanned if different from curated_root
         roots.append(Path(settings.quant_core_root) / "configs")
         roots.append(Path(settings.quant_core_root) / "artifacts")
-    roots += [Path("data_curated"), Path("configs"), Path("artifacts")]
+    # local fallbacks (dedup handled later)
+    roots += [Path("configs"), Path("artifacts")]
     seen: set[str] = set()
     out: list[FileListEntry] = []
     exts = {

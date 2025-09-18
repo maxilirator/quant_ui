@@ -172,7 +172,7 @@ register(
     TaskDef(
         id="backtest_batch",
         summary="Generate parameter sweep strategy configs",
-        module="cli.strategies_sweep",
+        module="src.cli.strategies_sweep",
         params=[
             ParamSpec("signal", required=True, description="Signal parquet path"),
             ParamSpec("name_prefix", required=True, description="Strategy name prefix"),
@@ -219,7 +219,7 @@ register(
     TaskDef(
         id="select_strategies",
         summary="Evaluate & rank strategies (persist summary + weight panels)",
-        module="cli.strategies_select",
+        module="src.cli.strategies_select",
         params=[
             ParamSpec(
                 "strategies",
@@ -243,7 +243,9 @@ register(
 
 
 def _build_manifest_builder(p: Dict[str, Any]) -> List[str]:
-    args: List[str] = ["build"]  # typer subcommand
+    # Typer exposes 'build' as the default command entrypoint when invoked via python -m app.cli.build_manifest build
+    # We call the module without the subcommand to match the error observed; removing 'build' fixes unexpected extra argument.
+    args: List[str] = []
     if p.get("artifacts"):
         args += ["--artifacts", p["artifacts"]]
     if p.get("git"):
@@ -298,6 +300,17 @@ def _daily_pipeline_builder(p: Dict[str, Any]) -> List[str]:
         args.append("--manifest")
     if p.get("ui_backend"):
         args += ["--ui-backend", p["ui_backend"]]
+    # Fallback export flags propagated to export_ui_artifacts
+    if p.get("data"):
+        args += ["--data", p["data"]]
+    if p.get("fallback_data"):
+        args += ["--fallback-data", p["fallback_data"]]
+    if p.get("auto_fallback"):
+        args.append("--auto-fallback")
+    if p.get("mvp"):
+        args.append("--mvp")
+    if p.get("synthetic"):
+        args.append("--synthetic")
     return args
 
 
@@ -322,6 +335,29 @@ register(
             ParamSpec("strict", type="bool", default=False),
             ParamSpec("manifest", type="bool", default=False),
             ParamSpec("ui_backend", description="UI backend path for manifest"),
+            ParamSpec("data", description="Primary raw history CSV for MVP fallback"),
+            ParamSpec(
+                "fallback_data", description="Secondary CSV used only for auto fallback"
+            ),
+            ParamSpec(
+                "auto_fallback",
+                type="bool",
+                default=False,
+                description="If export has zero runs, attempt MVP fallback automatically",
+            ),
+            ParamSpec(
+                "mvp",
+                type="bool",
+                default=False,
+                description="Force MVP fallback regardless of runs DB contents",
+            ),
+            ParamSpec(
+                "synthetic",
+                type="bool",
+                default=False,
+                dev_only=True,
+                description="Dev: fabricate placeholder strategies if all else empty",
+            ),
         ],
         build=_daily_pipeline_builder,
         category="pipeline",
@@ -338,6 +374,8 @@ def _build_curated_all_builder(p: Dict[str, Any]) -> List[str]:
     args: List[str] = []
     if p.get("borsdata_csv"):
         args += ["--borsdata-csv", p["borsdata_csv"]]
+    if p.get("stock_history_csv"):
+        args += ["--stock-history-csv", p["stock_history_csv"]]
     if p.get("eursek_csv"):
         args += ["--eursek-csv", p["eursek_csv"]]
     if p.get("universe_csv"):
@@ -372,6 +410,9 @@ register(
         module="src.data.build_all",
         params=[
             ParamSpec("borsdata_csv", description="Börsdata history CSV"),
+            ParamSpec(
+                "stock_history_csv", description="Canonical stock_history OHLCV CSV"
+            ),
             ParamSpec("eursek_csv", description="EUR/SEK FX CSV"),
             ParamSpec("universe_csv", description="Universe membership input CSV"),
             ParamSpec(

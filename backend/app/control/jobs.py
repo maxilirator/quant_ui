@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, Future
-import subprocess, threading, uuid, time, os, sys
+import subprocess, threading, uuid, time, os, sys, json
 
 MAX_LOG_LINES = 4000
 TAIL_LINES = 120
@@ -50,6 +50,11 @@ class JobRecord:
         }
 
 
+PERSIST_PATH_ENV = "QUANT_JOBS_STORE"
+DEFAULT_JOBS_PATH = os.path.join("artifacts", "jobs", "jobs.jsonl")
+MAX_HYDRATE = 400  # max historical jobs to load into memory
+
+
 class JobManager:
     def __init__(self, max_workers: int = 2):
         self._jobs: Dict[str, JobRecord] = {}
@@ -58,6 +63,77 @@ class JobManager:
             max_workers=max_workers, thread_name_prefix="quant-job"
         )
         self._futures: Dict[str, Future] = {}
+        self._persist_path = os.environ.get(PERSIST_PATH_ENV, DEFAULT_JOBS_PATH)
+        self._ensure_persist_dir()
+        self._hydrate_finished()
+
+    # ---------------- Persistence -----------------
+    def _ensure_persist_dir(self):
+        try:
+            d = os.path.dirname(self._persist_path)
+            if d and not os.path.exists(d):
+                os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass  # best effort
+
+    def _persist(self, rec: JobRecord):
+        # Only persist terminal states
+        if rec.status not in ("succeeded", "failed", "cancelled"):
+            return
+        try:
+            payload = asdict(rec)
+            # Trim large logs to tail to keep file size bounded
+            if len(payload.get("stdout", [])) > 300:
+                payload["stdout"] = payload["stdout"][-300:]
+            if len(payload.get("stderr", [])) > 300:
+                payload["stderr"] = payload["stderr"][-300:]
+            with open(self._persist_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception:
+            # Avoid crashing job finalize due to IO issues
+            pass
+
+    def _hydrate_finished(self):
+        if not os.path.exists(self._persist_path):
+            return
+        try:
+            lines: list[str] = []
+            with open(self._persist_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    lines.append(line)
+            # Keep only last MAX_HYDRATE lines
+            for raw in lines[-MAX_HYDRATE:]:
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    continue
+                # Don't overwrite if an active job with same id (extremely unlikely)
+                jid = data.get("id")
+                if not jid or jid in self._jobs:
+                    continue
+                # Reconstruct JobRecord in finished state
+                rec = JobRecord(
+                    id=data.get("id"),
+                    task_id=data.get("task_id", "unknown"),
+                    argv=data.get("argv", []),
+                    status=data.get("status", "succeeded"),
+                    created_at=data.get("created_at", time.time()),
+                    started_at=data.get("started_at"),
+                    finished_at=data.get("finished_at"),
+                    exit_code=data.get("exit_code"),
+                    stdout=data.get("stdout", []),
+                    stderr=data.get("stderr", []),
+                    error=data.get("error"),
+                    cancelled=data.get("cancelled", False),
+                    pid=None,
+                )
+                self._jobs[jid] = rec
+        except Exception:
+            # Ignore hydrate failures
+            pass
 
     def list(self) -> List[Dict]:
         with self._lock:
@@ -74,9 +150,11 @@ class JobManager:
         args: List[str],
         cwd: str | None = None,
         env: Dict[str, str] | None = None,
+        python_exe: str | None = None,
     ) -> JobRecord:
         job_id = uuid.uuid4().hex
-        argv = [sys.executable, "-m", module, *args]
+        py = python_exe or sys.executable
+        argv = [py, "-m", module, *args]
         rec = JobRecord(id=job_id, task_id=task_id, argv=argv)
         with self._lock:
             self._jobs[job_id] = rec
@@ -160,6 +238,11 @@ class JobManager:
             rec.error = str(e)
         finally:
             rec.finished_at = time.time()
+            # Persist terminal job state
+            try:
+                self._persist(rec)
+            except Exception:
+                pass
 
 
 # Singleton accessor
