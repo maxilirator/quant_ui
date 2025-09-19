@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { page } from "$app/stores";
   import {
     runControlTask,
     getControlJob,
@@ -97,6 +98,15 @@
     } catch {}
     try {
       controlMeta = await getControlMeta(fetch);
+    } catch {}
+    // Deep-link task selection (?task=task_id)
+    try {
+      const url = new URL(window.location.href);
+      const taskParam = url.searchParams.get("task");
+      if (taskParam) {
+        const t = tasks.find((t) => t.id === taskParam);
+        if (t) selectTask(t);
+      }
     } catch {}
   });
 
@@ -258,6 +268,7 @@
 
 <h1>Control Panel</h1>
 {#if errorMsg}<div class="error">{errorMsg}</div>{/if}
+
 <div class="grid">
   <div>
     <h3>Tasks</h3>
@@ -267,7 +278,15 @@
           class="task-item {selectedTask && selectedTask.id === t.id
             ? 'active'
             : ''}"
+          role="button"
+          tabindex="0"
           on:click={() => selectTask(t)}
+          on:keydown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              selectTask(t);
+            }
+          }}
         >
           <div><strong>{t.id}</strong></div>
           <div class="desc">{t.summary}</div>
@@ -727,7 +746,7 @@
         <div><strong>Started:</strong> {formatTs(activeJob.started_at)}</div>
         <div><strong>Finished:</strong> {formatTs(activeJob.finished_at)}</div>
         {#if activeJob.status === "running"}
-          <button on:click={() => cancel(activeJob)}>Cancel</button>
+          <button on:click={() => cancel(activeJob!)}>Cancel</button>
         {/if}
         {#if activeLogs}
           <div class="logs-wrap">

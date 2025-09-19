@@ -99,96 +99,90 @@
 
 <h1>Data Browser</h1>
 {#if errorMsg}<div class="error">{errorMsg}</div>{/if}
-<div class="layout">
-  <section class="panel">
-    <header>
-      <h3>Domains</h3>
-      <button on:click={() => loadDomains(true)}>Refresh</button>
-    </header>
-    <table class="tbl small">
-      <thead
-        ><tr
-          ><th>Domain</th><th>Type</th><th>Rows</th><th>Cols</th><th
-            >Features</th
-          ></tr
-        ></thead
-      >
-      <tbody>
-        {#each domains as d}
-          <tr
-            class:selected={selectedDomain === d.domain}
-            on:click={() => selectDomain(d.domain)}
-          >
-            <td>{d.domain}</td><td>{d.type}</td><td>{d.rows}</td><td
-              >{d.cols}</td
-            ><td>{d.features.length}</td>
-          </tr>
-        {/each}
-        {#if !domains.length}<tr
-            ><td colspan="5" class="muted">(no domains)</td></tr
-          >{/if}
-      </tbody>
-    </table>
-    {#if skipped.length}
-      <details class="skipped">
-        <summary>Skipped ({skipped.length})</summary>
-        <ul>
-          {#each skipped as s}<li>{s.domain}: {s.reason}</li>{/each}
-        </ul>
-      </details>
-    {/if}
-  </section>
-  <section class="panel">
-    <header>
-      <h3>Domain Sample</h3>
-      <div class="inline-controls">
-        <label
-          >Limit <input
-            type="number"
-            bind:value={sampleLimit}
-            min="10"
-            max="1000"
-          /></label
-        >
-        <button
-          on:click={loadSample}
-          disabled={!selectedDomain || loadingSample}
-          >{loadingSample ? "Loading..." : "Reload"}</button
-        >
-      </div>
-    </header>
-    {#if domainSample}
-      <div class="sample-meta">
-        {domainSample.domain} • {domainSample.rows.length} rows • {domainSample
-          .columns.length} cols
-      </div>
-      <div class="table-wrap">
-        <table class="tbl scroll">
-          <thead
-            ><tr
-              >{#each domainSample.columns as c}<th>{c}</th>{/each}</tr
-            ></thead
-          >
-          <tbody>
-            {#each domainSample.rows as r}
-              <tr
-                >{#each domainSample.columns as c}<td>{r[c]}</td>{/each}</tr
-              >
-            {/each}
-          </tbody>
-        </table>
-      </div>
-    {:else if selectedDomain}
-      <div class="muted">No sample loaded yet.</div>
-    {:else}
-      <div class="muted">Select a domain to view sample.</div>
-    {/if}
-  </section>
-</div>
 
-<h2 style="margin-top:2rem;">Files</h2>
-<div class="files-layout">
-  <div class="panel">
+<div class="domains-layout">
+  <header>
+    <h3>Domains</h3>
+    <button on:click={() => loadDomains(true)}>Refresh</button>
+  </header>
+  <table class="tbl small">
+    <thead
+      ><tr
+        ><th>Domain</th><th>Type</th><th>Rows</th><th>Cols</th><th>Features</th
+        ></tr
+      ></thead
+    >
+    <tbody>
+      {#each domains as d}
+        <tr
+          class:selected={selectedDomain === d.domain}
+          on:click={() => selectDomain(d.domain)}
+        >
+          <td>{d.domain}</td><td>{d.type}</td><td>{d.rows}</td><td>{d.cols}</td
+          ><td>{d.features.length}</td>
+        </tr>
+      {/each}
+      {#if !domains.length}<tr
+          ><td colspan="5" class="muted">(no domains)</td></tr
+        >{/if}
+    </tbody>
+  </table>
+  {#if skipped.length}
+    <details class="skipped">
+      <summary>Skipped ({skipped.length})</summary>
+      <ul>
+        {#each skipped as s}<li>{s.domain}: {s.reason}</li>{/each}
+      </ul>
+    </details>
+  {/if}
+</div>
+<div class="domains-layout">
+  <header>
+    <h3>Domain Sample</h3>
+    <div class="inline-controls">
+      <label
+        >Limit <input
+          type="number"
+          bind:value={sampleLimit}
+          min="10"
+          max="1000"
+        /></label
+      >
+      <button on:click={loadSample} disabled={!selectedDomain || loadingSample}
+        >{loadingSample ? "Loading..." : "Reload"}</button
+      >
+    </div>
+  </header>
+  {#if domainSample}
+    <div class="sample-meta">
+      {domainSample.domain} • {domainSample.rows.length} rows • {domainSample
+        .columns.length} cols
+    </div>
+    <div class="table-wrap">
+      <table class="tbl scroll">
+        <thead
+          ><tr
+            >{#each domainSample.columns as c}<th>{c}</th>{/each}</tr
+          ></thead
+        >
+        <tbody>
+          {#each domainSample.rows as r}
+            <tr
+              >{#each domainSample.columns as c}<td>{r[c]}</td>{/each}</tr
+            >
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  {:else if selectedDomain}
+    <div class="muted">No sample loaded yet.</div>
+  {:else}
+    <div class="muted">Select a domain to view sample.</div>
+  {/if}
+</div>
+<div class="domains-layout">
+  <h2 style="margin-top:2rem;">Files</h2>
+  <div class="domains-layout">
     <div class="file-toolbar">
       <label
         >Filter <input
@@ -224,7 +218,7 @@
       </table>
     </div>
   </div>
-  <div class="panel">
+  <div class="domains-layout">
     <header><h3>Preview</h3></header>
     {#if filePreview}
       <div class="preview-meta">{filePreview.kind} • {filePreview.path}</div>
@@ -281,19 +275,13 @@
   h1 {
     margin-bottom: 0.75rem;
   }
-  .layout {
-    display: grid;
-    grid-template-columns: 1fr 2fr;
-    gap: 1rem;
-  }
-  .panel {
-    border: 1px solid #333;
-    padding: 0.6rem;
-    border-radius: 4px;
-    background: #111;
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
+  .domains-layout {
+    font-size: 1rem;
+    background-color: #111;
+    border: #1e293b solid 1px;
+    border-radius: 0.5rem;
+    padding: 1rem;
+    margin-bottom: 1.5rem;
   }
   header {
     display: flex;
@@ -315,7 +303,7 @@
   table.tbl {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.68rem;
+    font-size: 1rem;
   }
   table.tbl th,
   table.tbl td {
@@ -331,25 +319,19 @@
   }
   .tbl.small th,
   .tbl.small td {
-    font-size: 0.65rem;
+    font-size: 1;
   }
   .muted {
     color: #666;
-    font-size: 0.65rem;
+    font-size: 1;
   }
   .skipped {
-    font-size: 0.6rem;
+    font-size: 1;
   }
   .table-wrap {
     overflow: auto;
     max-height: 300px;
     border: 1px solid #222;
-  }
-  .files-layout {
-    display: grid;
-    grid-template-columns: 1.2fr 2fr;
-    gap: 1rem;
-    margin-top: 0.5rem;
   }
   .file-toolbar {
     display: flex;
@@ -372,7 +354,7 @@
     padding: 6px;
     max-height: 300px;
     overflow: auto;
-    font-size: 0.65rem;
+    font-size: 1rem;
   }
   .inline-controls {
     display: flex;

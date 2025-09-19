@@ -114,6 +114,14 @@ export interface PrimitiveCatalogResponse {
   primitives: PrimitiveDefinition[];
 }
 
+// Aggregated catalog manifest (optional combined endpoint)
+export interface CatalogManifest {
+  generated_at: string;
+  features?: FeatureDefinition[];
+  primitives?: PrimitiveDefinition[];
+  version?: number;
+}
+
 export interface BrokerPosition { symbol: string; quantity: number; avg_price: number; market_value: number; currency: string } // deprecated
 
 export interface OrderRequest { symbol: string; side: 'buy' | 'sell'; qty: number; order_type?: 'mkt' | 'lmt'; limit_price?: number | null } // deprecated

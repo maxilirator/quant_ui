@@ -224,3 +224,26 @@ export async function previewDataFile(fetcher: typeof fetch, path: string, limit
   return request(fetcher, `/control/data/file/preview?${qs.toString()}`);
 }
 
+// Readiness diagnostics
+export interface ReadinessSummary {
+  status: string;
+  fail_count: number;
+  warn_count: number;
+  generated_at: number;
+  params: Record<string, any>;
+  suggestions?: Array<Record<string, any>>;
+  curated_root?: string;
+  curated_root_source?: string;
+  curated_root_candidates?: Array<Record<string, any>>;
+}
+export interface ReadinessCheck { id: string; category: string; status: string; message: string; remediation: string; metrics: Record<string, any> }
+export interface ReadinessPayload { summary: ReadinessSummary; checks: ReadinessCheck[] }
+export async function getReadinessDiagnostics(fetcher: typeof fetch, opts: { min_tickers?: number; min_days?: number; fresh_days?: number } = {}): Promise<ReadinessPayload> {
+  const qs = new URLSearchParams();
+  if (opts.min_tickers !== undefined) qs.set('min_tickers', String(opts.min_tickers));
+  if (opts.min_days !== undefined) qs.set('min_days', String(opts.min_days));
+  if (opts.fresh_days !== undefined) qs.set('fresh_days', String(opts.fresh_days));
+  const q = qs.toString();
+  return request(fetcher, `/control/diagnostics/readiness${q ? `?${q}` : ''}`);
+}
+

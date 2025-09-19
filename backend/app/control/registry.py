@@ -452,3 +452,48 @@ register(
         use_core_root_cwd=True,
     )
 )
+
+
+# ------------------- Diagnostics Tasks ---------------------------------
+
+
+def _readiness_builder(p: Dict[str, Any]) -> List[str]:
+    args: List[str] = []
+    if p.get("curated_root"):
+        args += ["--curated-root", p["curated_root"]]
+    if p.get("artifacts_root"):
+        args += ["--artifacts-root", p["artifacts_root"]]
+    if p.get("config_root"):
+        args += ["--config-root", p["config_root"]]
+    if p.get("min_tickers") is not None:
+        args += ["--min-tickers", str(p["min_tickers"])]
+    if p.get("min_days") is not None:
+        args += ["--min-days", str(p["min_days"])]
+    if p.get("fresh_days") is not None:
+        args += ["--fresh-days", str(p["fresh_days"])]
+    if p.get("json"):
+        args.append("--json")
+    return args
+
+
+register(
+    TaskDef(
+        id="readiness_check",
+        summary="Run environment readiness diagnostics",
+        module="src.cli.readiness_check",
+        params=[
+            ParamSpec("curated_root", description="Override curated data root"),
+            ParamSpec("artifacts_root", description="Override artifacts root"),
+            ParamSpec("config_root", description="Override configs root"),
+            ParamSpec("min_tickers", type="int", default=5),
+            ParamSpec("min_days", type="int", default=252),
+            ParamSpec("fresh_days", type="int", default=5),
+            ParamSpec(
+                "json", type="bool", default=False, description="Emit JSON output"
+            ),
+        ],
+        build=_readiness_builder,
+        category="diagnostics",
+        use_core_root_cwd=True,
+    )
+)

@@ -148,7 +148,7 @@
   main {
     flex: 1;
     padding: 2.5rem;
-    max-width: 1080px;
+    max-width: 2048px;
     width: 100%;
     margin: 0 auto;
     box-sizing: border-box;

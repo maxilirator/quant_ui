@@ -15,6 +15,7 @@ from app.core.config import get_settings
 from pathlib import Path
 import os
 import yaml  # type: ignore
+import sys
 from app.control.jobs import get_manager
 import json
 import sqlite3
@@ -29,6 +30,9 @@ try:
     import pandas as pd  # type: ignore
 except Exception:  # pragma: no cover
     pd = None  # type: ignore
+
+# TODO: Settings import from quant app and maybe a warapper so we dont need to rewrite it. Or, not
+# Anyway as for now we have alot of local configs which we said should be merged in system.yaml
 
 
 # Dynamic loader for quant core data registry to avoid hard import dependency at startup.
@@ -53,7 +57,12 @@ class RegistryError(Exception):  # fallback placeholder if core not available
 
 router = APIRouter(tags=["control"], prefix="/control")
 
-# -------- Curated root resolution (unify data location) --------
+"""Curated root resolution helper.
+
+Attempts to import quant core's centralized resolver (src.config.paths.resolve_curated_root)
+to avoid drift. Falls back to legacy heuristic only if core import fails.
+"""
+
 _DATA_YAML_CACHE: dict[str, tuple[float, dict]] = {}
 
 
@@ -76,16 +85,13 @@ def _load_data_yaml(path: Path) -> dict:
     return data
 
 
-def _resolve_curated_root(settings) -> Path:
+def _legacy_curated_root(settings) -> tuple[Path, list[Path]]:
     candidates: list[Path] = []
-    # 1. Explicit data_root setting
     if getattr(settings, "data_root", None):
         candidates.append(Path(settings.data_root))  # type: ignore[arg-type]
-    # 2. Env override
     env_cur = os.getenv("QUANT_CURATED_DIR")
     if env_cur:
         candidates.append(Path(env_cur))
-    # 3. Core root default + core data.yaml
     if settings.quant_core_root:
         core_root = Path(settings.quant_core_root)
         candidates.append(core_root / "data_curated")
@@ -97,7 +103,6 @@ def _resolve_curated_root(settings) -> Path:
             if not p.is_absolute():
                 p = (core_root / cur_dir).resolve()
             candidates.append(p)
-    # 4. Local data.yaml
     local_yaml = Path("configs") / "data.yaml"
     loc_cfg = _load_data_yaml(local_yaml)
     if loc_cfg.get("curated_dir"):
@@ -105,15 +110,47 @@ def _resolve_curated_root(settings) -> Path:
         if not p.is_absolute():
             p = Path(loc_cfg["curated_dir"]).resolve()
         candidates.append(p)
-    # 5. Fallback
     candidates.append(Path("data_curated").resolve())
     for c in candidates:
         try:
             if c.exists():
-                return c
+                return c, candidates
         except Exception:
             continue
-    return candidates[-1]
+    return candidates[-1], candidates
+
+
+def _resolve_curated_root(settings):
+    """Return (resolved_path, candidate_list, source_label, candidate_descriptors)."""
+    # Try core resolver
+    if settings.quant_core_root and settings.quant_core_root not in sys.path:
+        sys.path.insert(0, settings.quant_core_root)
+    try:  # pragma: no cover - optional path import
+        import importlib
+
+        mod = importlib.import_module("src.config.paths")
+        core_resolve = getattr(mod, "resolve_curated_root")
+        res = core_resolve()
+        resolved = res.resolved.path
+        source = res.resolved.source
+        candidates_struct = [
+            {"path": str(c.path), "source": c.source, "exists": c.path.exists()}  # type: ignore[attr-defined]
+            for c in res.candidates
+        ]
+        return (
+            resolved,
+            [Path(c["path"]) for c in candidates_struct],
+            source,
+            candidates_struct,
+        )
+    except Exception:
+        # Fallback legacy
+        resolved, legacy_candidates = _legacy_curated_root(settings)
+        candidates_struct = [
+            {"path": str(c), "source": "legacy", "exists": c.exists()}
+            for c in legacy_candidates
+        ]
+        return resolved, legacy_candidates, "legacy", candidates_struct
 
 
 class TaskParam(BaseModel):
@@ -250,12 +287,13 @@ class ControlMeta(BaseModel):
     quant_core_root: str | None = None
     artifacts_root: str | None = None
     curated_root: str | None = None
+    curated_root_source: str | None = None
 
 
 @router.get("/meta", response_model=ControlMeta)
 async def control_meta():
     settings = get_settings()
-    curated = _resolve_curated_root(settings)
+    curated_path, _cands, source, _cand_struct = _resolve_curated_root(settings)
     return ControlMeta(
         dev_mode=settings.dev_mode,
         version=settings.version,
@@ -263,71 +301,90 @@ async def control_meta():
         data_version=settings.data_version,
         quant_core_root=settings.quant_core_root,
         artifacts_root=settings.artifacts_root,
-        curated_root=str(curated) if curated else None,
+        curated_root=str(curated_path) if curated_path else None,
+        curated_root_source=source,
     )
 
 
 class DebugConfig(BaseModel):
     curated_root: str
+    curated_root_source: str | None = None
     candidates: list[str]
     exists: list[bool]
+    candidate_info: list[dict] | None = None  # structured source/exists/path triplets
     data_yaml_local: dict
     data_yaml_core: dict | None = None
     core_python: str | None = None
+    # Unified system config exposure (safe subset)
+    system_present: bool
+    system_paths: dict | None = None
+    readiness_thresholds: dict | None = None
+    system_warnings: list[str] | None = None
+    system_provenance: list[dict] | None = None
 
 
 @router.get("/debug/config", response_model=DebugConfig)
 async def debug_config():
-    """Return detailed curated root resolution diagnostics for UI display.
-
-    This intentionally replays the resolution logic rather than importing
-    quant core helpers to avoid tight coupling; it mirrors _resolve_curated_root.
-    """
+    """Return curated root + unified system config diagnostics."""
     settings = get_settings()
-    # Reconstruct candidate list for transparency
-    candidates: list[Path] = []
-    data_yaml_local: dict = {}
+    resolved, candidates, source, cand_struct = _resolve_curated_root(settings)
+    # Legacy YAML (for comparison)
+    loc_yaml = Path("configs") / "data.yaml"
+    data_yaml_local = _load_data_yaml(loc_yaml)
     data_yaml_core: dict | None = None
-    # 1 explicit data_root setting
-    if getattr(settings, "data_root", None):
-        candidates.append(Path(settings.data_root))  # type: ignore[arg-type]
-    env_cur = os.getenv("QUANT_CURATED_DIR")
-    if env_cur:
-        candidates.append(Path(env_cur))
     if settings.quant_core_root:
-        core_root = Path(settings.quant_core_root)
-        candidates.append(core_root / "data_curated")
-        core_yaml = core_root / "configs" / "data.yaml"
+        core_yaml = Path(settings.quant_core_root) / "configs" / "data.yaml"
         data_yaml_core = _load_data_yaml(core_yaml)
-        cd = data_yaml_core.get("curated_dir") if data_yaml_core else None
-        if cd:
-            p = Path(cd)
-            if not p.is_absolute():
-                p = (core_root / cd).resolve()
-            candidates.append(p)
-    local_yaml = Path("configs") / "data.yaml"
-    data_yaml_local = _load_data_yaml(local_yaml)
-    ld = data_yaml_local.get("curated_dir")
-    if ld:
-        p = Path(ld)
-        if not p.is_absolute():
-            p = Path(ld).resolve()
-        candidates.append(p)
-    candidates.append(Path("data_curated").resolve())
-    resolved = _resolve_curated_root(settings)
-    exists = []
-    for c in candidates:
-        try:
-            exists.append(c.exists())
-        except Exception:
-            exists.append(False)
+    exists = [c.exists() for c in candidates]
+    # Unified system config (attempt import from quant core)
+    system_present = False
+    system_paths = None
+    readiness_thresholds = None
+    system_warnings = None
+    system_prov = None
+    try:  # dynamic import to avoid tight startup coupling
+        import importlib, sys as _sys
+
+        if settings.quant_core_root and settings.quant_core_root not in _sys.path:
+            _sys.path.insert(0, settings.quant_core_root)
+        sys_mod = importlib.import_module("src.config.system")
+        get_system_config = getattr(sys_mod, "get_system_config")
+        prov = getattr(sys_mod, "provenance", None)
+        scfg = get_system_config()
+        system_present = True
+        system_paths = {
+            "curated_dir": scfg.paths.curated_dir,
+            "raw_dir": scfg.paths.raw_dir,
+            "artifacts_dir": scfg.paths.artifacts_dir,
+            "strategies_dir": scfg.paths.strategies_dir,
+        }
+        readiness_thresholds = {
+            "min_tickers": scfg.readiness.min_tickers,
+            "min_days": scfg.readiness.min_days,
+            "stale_days_warn": scfg.readiness.stale_days_warn,
+        }
+        system_warnings = getattr(scfg, "warnings", None)
+        if prov:
+            try:
+                system_prov = prov()
+            except Exception:
+                pass
+    except Exception:
+        pass
     return DebugConfig(
         curated_root=str(resolved),
+        curated_root_source=source,
         candidates=[str(c) for c in candidates],
         exists=exists,
+        candidate_info=cand_struct,
         data_yaml_local=data_yaml_local,
         data_yaml_core=data_yaml_core,
         core_python=getattr(settings, "core_python", None),
+        system_present=system_present,
+        system_paths=system_paths,
+        readiness_thresholds=readiness_thresholds,
+        system_warnings=system_warnings,
+        system_provenance=system_prov,
     )
 
 
@@ -627,15 +684,15 @@ async def data_domains(refresh: bool = False, debug: bool = False):
     actionable feedback while remaining functional.
     """
     settings = get_settings()
-    curated = _resolve_curated_root(settings)
-    if not curated.exists():
+    curated_path, _candidates, _source, _cand_struct = _resolve_curated_root(settings)
+    if not curated_path.exists():
         return DomainsResponse(
             domains=[],
-            skipped=[{"reason": "curated root not found", "path": str(curated)}],
+            skipped=[{"reason": "curated root not found", "path": str(curated_path)}],
         )
     try:
         try:
-            reg = _get_registry(curated)
+            reg = _get_registry(curated_path)
         except HTTPException as e:  # import failure already wrapped
             return DomainsResponse(
                 domains=[],
@@ -649,7 +706,7 @@ async def data_domains(refresh: bool = False, debug: bool = False):
                     importlib.reload(sys.modules["src.data.registry"])  # type: ignore
                 regmod = importlib.import_module("src.data.registry")  # type: ignore
                 regmod._def_registry = None  # type: ignore[attr-defined]
-                reg = _get_registry(curated)
+                reg = _get_registry(curated_path)
             except Exception as e:  # pragma: no cover - defensive
                 return DomainsResponse(
                     domains=[],
@@ -680,7 +737,7 @@ async def data_domains(refresh: bool = False, debug: bool = False):
             skipped.append(
                 {
                     "reason": "debug",
-                    "detail": f"domains={len(metas)} skipped={len(skipped)} curated_root={curated}",  # type: ignore[arg-type]
+                    "detail": f"domains={len(metas)} skipped={len(skipped)} curated_root={curated_path}",  # type: ignore[arg-type]
                 }
             )
         return DomainsResponse(domains=metas, skipped=skipped)
@@ -700,8 +757,8 @@ class DomainSample(BaseModel):
 @router.get("/data/sample", response_model=DomainSample)
 async def data_sample(domain: str, limit: int = 50):
     settings = get_settings()
-    curated = _resolve_curated_root(settings)
-    reg = _get_registry(curated)
+    curated_path, _candidates, _source, _cand_struct = _resolve_curated_root(settings)
+    reg = _get_registry(curated_path)
     df = reg.load_all()
     # isolate columns belonging to domain + date,ticker
     meta = reg.domain_meta(domain)
@@ -735,8 +792,8 @@ class FileListEntry(BaseModel):
 @router.get("/data/files", response_model=list[FileListEntry])
 async def data_files(max_results: int = 400):
     settings = get_settings()
-    curated_root = _resolve_curated_root(settings)
-    roots = [curated_root]
+    curated_path, _candidates, _source, _cand_struct = _resolve_curated_root(settings)
+    roots = [curated_path]
     if settings.quant_core_root:
         # ensure configs/artifacts from core root still scanned if different from curated_root
         roots.append(Path(settings.quant_core_root) / "configs")
@@ -880,3 +937,60 @@ async def data_file_preview(path: str, limit: int = 50, table: Optional[str] = N
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"duckdb preview failed: {e}")
     raise HTTPException(status_code=400, detail="unsupported file type for preview")
+
+
+# ----------------- Readiness Diagnostics ---------------------
+class ReadinessSummary(BaseModel):
+    status: str
+    fail_count: int
+    warn_count: int
+    generated_at: int
+    params: dict
+    # Optional enrichment fields from quant core diagnostics (accepted passthrough)
+    suggestions: list[dict] | None = None
+    curated_root: str | None = None
+    curated_root_source: str | None = None
+    curated_root_candidates: list[dict] | None = None
+
+
+class ReadinessPayload(BaseModel):
+    summary: ReadinessSummary
+    checks: list[dict]
+
+
+@router.get("/diagnostics/readiness", response_model=ReadinessPayload)
+async def diagnostics_readiness(
+    min_tickers: int = 5,
+    min_days: int = 252,
+    fresh_days: int = 5,
+):
+    """Return environment readiness diagnostics for strategy discovery/backtesting.
+
+    Query params allow overriding baseline thresholds without changing backend config.
+    """
+    # settings = get_settings()
+
+    # Import core diagnostics from quant project root (quant core path resolution already handled elsewhere)
+    # print("diagnostics_readiness: quant_core_root", settings)
+    import importlib, sys, os
+
+    quantConfig = importlib.import_module("src.config.system")
+    systemConfig = quantConfig.get_system_config(True)
+    try:
+        diag_mod = importlib.import_module("src.diagnostics.readiness")
+        compute = getattr(diag_mod, "compute_readiness")
+        print(f"Curated root for diagnostics: {systemConfig.paths.curated_dir}")
+        result = compute(
+            curated_root=systemConfig.paths.curated_dir,  # pass explicit absolute path
+            artifacts_root=systemConfig.paths.artifacts_dir,
+            config_root=systemConfig.paths.strategies_dir,
+            min_tickers=systemConfig.readiness.min_tickers,
+            min_days=systemConfig.readiness.min_days,
+            fresh_days=systemConfig.readiness.stale_days_warn,
+        )
+    except Exception as e:  # pragma: no cover - diagnostics import error
+        # raise HTTPException(
+        #    status_code=500, detail=f"readiness diagnostics failed: {e}"
+        # )
+        raise e
+    return result  # pydantic will coerce
