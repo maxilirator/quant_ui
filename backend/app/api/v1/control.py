@@ -33,6 +33,8 @@ except Exception:  # pragma: no cover
 
 # TODO: Settings import from quant app and maybe a warapper so we dont need to rewrite it. Or, not
 # Anyway as for now we have alot of local configs which we said should be merged in system.yaml
+# Alse we are suposed to run the quenst readiness and diganostics not anything local,
+# There could be resons for unifinig the ui and the quant app,
 
 
 # Dynamic loader for quant core data registry to avoid hard import dependency at startup.
