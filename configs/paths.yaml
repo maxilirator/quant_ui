@@ -1,0 +1,3 @@
+# Absolute path to the data root (e.g., /mnt/c/dev/q-training/data/xsto).
+# This can be overridden by the DATA_ROOT environment variable.
+data_root: C:\dev\q-training\data\xsto

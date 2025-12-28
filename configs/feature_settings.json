@@ -1,0 +1,16 @@
+{
+  "features": {
+    "adv_20": {
+      "color": "#1f9bd1"
+    },
+    "cs_adv_60": {
+      "color": "#f59e0b"
+    },
+    "cs_vol_atr_14": {
+      "color": "#673c1e"
+    },
+    "omx30_close": {
+      "color": "#34d399"
+    }
+  }
+}

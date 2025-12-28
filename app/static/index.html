@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Research Desk</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/themes/dark.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap"
+    />
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body class="sl-theme-dark">
+    <div class="app">
+      <header class="topbar panel" data-animate="1">
+        <div class="brand">
+          <div class="logo-mark"></div>
+          <div>
+            <div class="title">Research Desk</div>
+            <div class="subtitle">XSTO anomaly inspection</div>
+          </div>
+        </div>
+        <div class="top-meta">
+          <div class="status-pill" id="status-pill">offline</div>
+          <div class="data-root" id="data-root">data root: --</div>
+          <sl-button size="small" id="refresh-health">Refresh</sl-button>
+        </div>
+      </header>
+
+      <aside class="left-panel panel" data-animate="2">
+        <div class="panel-title">Controls</div>
+        <section class="panel-section">
+          <div class="section-title">Ticker</div>
+          <sl-dropdown id="ticker-dropdown" placement="bottom-start" hoist>
+            <sl-button slot="trigger" size="small" id="ticker-trigger" caret>
+              Select ticker
+            </sl-button>
+            <div class="ticker-dropdown">
+              <sl-input id="ticker-filter" placeholder="Filter tickers"></sl-input>
+              <div class="ticker-table">
+                <div class="ticker-table-header">
+                  <span>Ticker</span>
+                  <span>Range</span>
+                  <span></span>
+                </div>
+                <div class="ticker-table-body" id="ticker-list"></div>
+              </div>
+            </div>
+          </sl-dropdown>
+          <div class="ticker-meta" id="ticker-meta">Sector: -- · Industry: --</div>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-title">Indexes</div>
+          <sl-dropdown id="index-dropdown" placement="bottom-start" hoist>
+            <sl-button slot="trigger" size="small" id="index-trigger" caret>
+              Indexes (0)
+            </sl-button>
+            <div class="index-dropdown">
+              <div class="index-selected" id="index-selected"></div>
+              <sl-input id="index-filter" placeholder="Filter indexes"></sl-input>
+              <div class="index-list" id="index-list"></div>
+              <div class="index-actions">
+                <sl-button size="small" id="clear-indexes">Clear</sl-button>
+              </div>
+            </div>
+          </sl-dropdown>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-title">Date Range</div>
+          <div class="date-row">
+            <sl-input id="date-from" type="date" label="From"></sl-input>
+            <sl-input id="date-to" type="date" label="To"></sl-input>
+          </div>
+          <div class="range-actions">
+            <sl-button size="small" id="range-2025">2025</sl-button>
+            <sl-button size="small" id="range-last-day">Last day</sl-button>
+            <sl-button size="small" id="range-last-week">Last week</sl-button>
+            <sl-button size="small" id="range-last-month">Last month</sl-button>
+          </div>
+          <div class="range-notice" id="instrument-range">
+            <div class="range-text" id="instrument-range-text">Instrument range: --</div>
+            <sl-button size="small" id="apply-instrument-range">Use instrument range</sl-button>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-title">Features</div>
+          <sl-dropdown id="feature-dropdown" placement="bottom-start" hoist>
+            <sl-button slot="trigger" size="small" id="feature-trigger" caret>
+              Features (0)
+            </sl-button>
+            <div class="feature-dropdown">
+              <div class="feature-selected" id="feature-selected"></div>
+              <sl-input id="feature-filter" placeholder="Filter features"></sl-input>
+              <div class="feature-list" id="feature-list"></div>
+              <div class="feature-actions">
+                <sl-button size="small" id="select-all">Select all</sl-button>
+                <sl-button size="small" id="clear-features">Clear</sl-button>
+              </div>
+            </div>
+          </sl-dropdown>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-title">Feature Controls</div>
+          <div class="feature-controls" id="feature-controls"></div>
+        </section>
+      </aside>
+
+      <main class="main-panel panel" data-animate="3">
+        <div class="chart-header">
+          <div>
+            <div class="chart-title">OHLC + Overlays</div>
+            <div class="chart-range" id="active-range">No range selected</div>
+          </div>
+          <div class="chart-actions">
+            <sl-button size="small" id="fit-chart">Fit</sl-button>
+            <sl-badge id="feature-count" pill>0 overlays</sl-badge>
+          </div>
+        </div>
+        <div class="chart-shell">
+          <div id="chart"></div>
+          <div class="chart-overlay" id="chart-overlay">
+            Load a ticker to start.
+          </div>
+        </div>
+      </main>
+
+      <section class="bottom-strip" data-animate="4">
+        <div class="strip-grid">
+          <div class="strip-card" id="calendar-warning">
+            <div class="strip-title">Calendar Warnings</div>
+            <div class="strip-value" id="calendar-warning-text">None</div>
+          </div>
+          <div class="strip-card" id="missing-bars-card">
+            <div class="strip-title">Missing Bars</div>
+            <div class="strip-value" id="missing-bars-text">--</div>
+          </div>
+          <div class="strip-card" id="nan-ratio-card">
+            <div class="strip-title">NaN Ratio</div>
+            <div class="strip-value" id="nan-ratio-text">--</div>
+          </div>
+          <div class="strip-card" id="mean-shift-card">
+            <div class="strip-title">Mean Shift</div>
+            <div class="strip-value">Planned</div>
+          </div>
+        </div>
+        <div class="strip-details">
+          <div class="strip-card">
+            <div class="strip-title">Missing Ratios</div>
+            <div class="diag-list" id="missing-ratios"></div>
+          </div>
+          <div class="strip-card">
+            <div class="strip-title">Feature Sources</div>
+            <div class="diag-list" id="feature-sources"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <script src="https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.js"></script>
+    <script
+      type="module"
+      src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/shoelace.js"
+    ></script>
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>

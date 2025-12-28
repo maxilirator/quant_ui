@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "@shoelace-style/shoelace": "^2.20.1",
+    "lightweight-charts": "^5.1.0"
+  }
+}

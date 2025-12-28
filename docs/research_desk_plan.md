@@ -8,7 +8,7 @@ Build a lightweight web-based research desk for **fast visual inspection and ano
 - No data generation; this is a **read-only** inspection tool.
 
 ## Data Inventory (q-training)
-All paths are repo-relative unless noted.
+All paths are repo-relative unless noted. `configs/paths.yaml` stores an absolute `data_root`.
 
 ### Core calendars / instruments
 - `data/xsto/calendars/day.txt`  
@@ -41,7 +41,7 @@ MultiIndex `(instrument, datetime)` or `(datetime, instrument)` depending on gen
 - `data/xsto/exogenous/exog_daily.parquet` (if present)
 
 ### Configs that describe paths / behavior
-- `configs/paths.yaml` (data_root, MLflow, Optuna, etc.)
+- `configs/paths.yaml` (absolute `data_root` only; other paths are derived in code; allow `DATA_ROOT` override)
 - `configs/feature_build.yaml` (feature generation settings)
 - `configs/fill_policy.yaml` (fill policy expectations)
 
@@ -83,9 +83,11 @@ Returns canonical tickers from `instruments/all.txt` and `indexes.txt`.
 - Optionally add flags: `instruments_only`, `indexes_only`.
 
 ### GET /features
-Returns available feature names from DuckDB views:
+Returns available feature names from DuckDB views (no `ticker` provided):
 - Alpha360 features + liquidity + sector + vol + exogenous + flags.
 - Provide `source` and `dtype` if available.
+- Filters: `q` (substring search), `source` (view name), `limit`.
+- Response includes `count`, `matched`, and `total`.
 
 ### GET /bars?ticker&from&to
 Returns OHLCV from qlib:
@@ -106,6 +108,7 @@ Returns time series for specified features:
 For any query window:
 - Check `from`/`to` present in `day.txt`.
 - If outside, return error with guidance.
+- Enforce calendar alignment by using `day.txt` as the source of truth for valid dates; responses include only calendar dates and report gaps in `meta.missing_dates`.
 
 ### Coverage guard (per response)
 For requested fields:
@@ -114,29 +117,38 @@ For requested fields:
 
 ### Instrument validity
 If ticker is delisted, enforce `all.txt` end-date:
-- If `to` > end_date, return error or clip with warning (configurable).
+- If `to` > end_date, return error (configurable).
+- If `from` < start_date, return error.
 
 ## UI Plan
-Shoelace + TradingView Lightweight Charts:
+Shoelace + TradingView Lightweight Charts (desktop-only, no mobile layout):
 
 ### Panels
 - **Ticker selector** (searchable).
 - **Date range** with calendar alignment warning.
-- **Bars chart** (OHLCV).
-- **Feature overlays** (selectable list).
-- **Diagnostics panel**: missing ratios, blackout stats, non-tradable ratios, sector label.
+- **Bars chart** (OHLCV) with **fixed volume subpanel**.
+- **Feature overlays** (selectable list) on a **secondary axis**; no hard limit on overlays.
+- **Diagnostics panel** (collapsible): missing ratios, blackout stats, non-tradable ratios, sector label.
 
-### Quick anomaly widgets
+### Quick anomaly widgets (bottom strip)
 - Missing bars per day
 - NaN ratio per feature
 - Sudden shifts vs 7d/30d mean
+- Calendar warnings appear here only.
+
+### Interaction / Theme
+- No hover table initially; consider click-to-table later if needed.
+- Visual direction: trading desk, dark theme.
 
 ## Implementation Steps
 
 1. **Repository setup**
+   - Python backend managed via `pyproject.toml`.
+   - App code lives under `app/`.
+   - Load absolute `data_root` from `configs/paths.yaml` with `DATA_ROOT` override.
    - Starlette app + minimal router.
+   - Cache qlib init at startup using the resolved `data_root`.
    - Single DuckDB connection (read-only).
-   - qlib init using `data/xsto` provider.
 
 2. **Data loaders**
    - `load_calendar()` from `day.txt`
@@ -152,6 +164,7 @@ Shoelace + TradingView Lightweight Charts:
    - Plain HTML + Shoelace
    - Lightweight Charts for OHLC
    - Feature overlay lines
+   - Served from the Starlette app static directory
 
 5. **Diagnostics**
    - Missing ratios
@@ -172,6 +185,7 @@ Shoelace + TradingView Lightweight Charts:
   ],
   "meta": {
     "missing_dates": [],
+    "missing_ratio": {"open": 0.0, "high": 0.0, "low": 0.0, "close": 0.0, "volume": 0.0},
     "source": "qlib"
   }
 }
@@ -199,6 +213,8 @@ Shoelace + TradingView Lightweight Charts:
 - Use `day.txt` as the only calendar authority.
 - Prefer **qlib** for OHLCV (bin files), **DuckDB** for features (parquet).
 - Fail fast on unknown tickers or missing features.
+- All API dates use ISO `YYYY-MM-DD`.
+- Normalize tickers to lowercase on input/output; feature names remain case-sensitive.
 
 ## Future Extensions (optional)
 - Cross-instrument comparison panel
