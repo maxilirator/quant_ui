@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Feature Power</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/themes/dark.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap"
+    />
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body class="sl-theme-dark">
+    <div class="feature-power-app">
+      <header class="topbar panel" data-animate="1">
+        <div class="topbar-left">
+          <div class="brand">
+            <div class="logo-mark"></div>
+            <div>
+              <div class="title">Research Desk</div>
+              <div class="subtitle">Feature power analytics</div>
+            </div>
+          </div>
+          <nav class="top-nav">
+            <a class="nav-link" href="/">Desk</a>
+            <a class="nav-link active" href="/feature-power">Feature Power</a>
+          </nav>
+        </div>
+        <div class="top-meta">
+          <div class="status-pill" id="status-pill">offline</div>
+          <div class="data-root" id="data-root">data root: --</div>
+          <sl-button size="small" id="refresh-health">Refresh</sl-button>
+        </div>
+      </header>
+
+      <aside class="left-panel panel feature-power-controls" data-animate="2">
+        <div class="panel-title">Feature Power</div>
+
+        <section class="panel-section">
+          <div class="section-title">Universe</div>
+          <sl-input id="universe" placeholder="all"></sl-input>
+          <div class="helper-text">Use all, indexes, or comma-separated tickers.</div>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-title">Target</div>
+          <sl-select id="target" label="Target" value="open_open">
+            <sl-option value="open_open">Open → Open</sl-option>
+            <sl-option value="ret_cc">Close → Close</sl-option>
+            <sl-option value="close_open">Close → Open</sl-option>
+          </sl-select>
+          <div class="field-row">
+            <sl-input id="horizon" type="number" label="Horizon (days)"></sl-input>
+            <sl-select id="method" label="Method">
+              <sl-option value="spearman">Spearman</sl-option>
+              <sl-option value="pearson">Pearson</sl-option>
+            </sl-select>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-title">Date Range</div>
+          <div class="field-row">
+            <sl-input id="date-from" type="date" label="From"></sl-input>
+            <sl-input id="date-to" type="date" label="To"></sl-input>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-title">Optional Filters</div>
+          <sl-input id="neutralize" placeholder="neutralize: sector,beta"></sl-input>
+          <sl-input id="regimes" placeholder="regimes: vol,market"></sl-input>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-title">Rolling Window</div>
+          <sl-input id="rolling-window" type="number" label="Days"></sl-input>
+          <div class="helper-text">Applies to per-date stats in the drilldown.</div>
+        </section>
+
+        <section class="panel-section">
+          <div class="run-actions">
+            <sl-button size="small" id="run-analysis">Run analysis</sl-button>
+            <sl-button size="small" id="clear-results">Clear results</sl-button>
+          </div>
+          <div class="helper-text" id="run-hint">Auto-runs on page load.</div>
+        </section>
+      </aside>
+
+      <main class="main-panel panel feature-power-main" data-animate="3">
+        <div class="chart-header">
+          <div>
+            <div class="chart-title">Feature Power</div>
+            <div class="chart-range" id="power-meta">Ready to run.</div>
+          </div>
+          <div class="chart-actions">
+            <sl-badge id="results-count" pill>0 features</sl-badge>
+          </div>
+        </div>
+
+        <div class="power-grid">
+          <section class="power-card power-table">
+            <div class="table-toolbar">
+              <sl-input id="results-filter" placeholder="Filter results"></sl-input>
+              <div class="table-meta" id="results-meta">No results yet.</div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead id="results-head">
+                  <tr>
+                    <th>
+                      <button class="sort-button" data-key="feature" type="button">
+                        Feature <span class="sort-indicator"></span>
+                      </button>
+                    </th>
+                    <th>
+                      <button class="sort-button" data-key="n_obs" type="button">
+                        N <span class="sort-indicator"></span>
+                      </button>
+                    </th>
+                    <th>
+                      <button class="sort-button" data-key="ic_mean" type="button">
+                        IC mean <span class="sort-indicator"></span>
+                      </button>
+                    </th>
+                    <th>
+                      <button class="sort-button" data-key="ic_std" type="button">
+                        IC std <span class="sort-indicator"></span>
+                      </button>
+                    </th>
+                    <th>
+                      <button class="sort-button" data-key="ic_ir" type="button">
+                        IC IR <span class="sort-indicator"></span>
+                      </button>
+                    </th>
+                    <th>
+                      <button class="sort-button" data-key="t_stat" type="button">
+                        t-stat <span class="sort-indicator"></span>
+                      </button>
+                    </th>
+                    <th>
+                      <button class="sort-button" data-key="decile_spread" type="button">
+                        Decile spread <span class="sort-indicator"></span>
+                      </button>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody id="results-body"></tbody>
+              </table>
+              <div class="table-empty" id="results-empty">Run analysis to see results.</div>
+            </div>
+          </section>
+
+          <section class="power-detail">
+            <div class="power-card">
+              <div class="detail-header">
+                <div class="detail-title" id="detail-title">Select a feature</div>
+                <div class="detail-meta" id="detail-meta">--</div>
+              </div>
+              <div class="detail-stats" id="detail-stats"></div>
+            </div>
+
+            <div class="power-card chart-card">
+              <div class="detail-section-title">IC (daily + rolling)</div>
+              <div class="chart-box">
+                <div id="ic-chart"></div>
+                <div class="chart-overlay" id="ic-empty">No IC data.</div>
+              </div>
+            </div>
+
+            <div class="power-card chart-card">
+              <div class="detail-section-title">Decile spread (daily + rolling)</div>
+              <div class="chart-box">
+                <div id="decile-chart"></div>
+                <div class="chart-overlay" id="decile-empty">No decile data.</div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <script src="https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.js"></script>
+    <script
+      type="module"
+      src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/shoelace.js"
+    ></script>
+    <script type="module" src="/static/feature_power.js"></script>
+  </body>
+</html>

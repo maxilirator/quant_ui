@@ -116,7 +116,6 @@ def _load_sector_map(
 
 def _build_index_definitions(
     market_indexes: list[dict],
-    sector_bounds: dict[str, dict[str, str]],
 ) -> tuple[list[dict], dict[str, dict[str, str]]]:
     index_list: list[dict] = []
     index_defs: dict[str, dict[str, str]] = {}
@@ -132,19 +131,6 @@ def _build_index_definitions(
         }
         index_list.append(entry)
         index_defs[ticker] = {"kind": "market", "ticker": ticker}
-
-    for sector in sorted(sector_bounds.keys()):
-        bounds = sector_bounds.get(sector, {})
-        entry = {
-            "id": f"sector:{sector}",
-            "label": sector,
-            "kind": "sector",
-            "start": bounds.get("start") or "",
-            "end": bounds.get("end") or "",
-            "sector": sector,
-        }
-        index_list.append(entry)
-        index_defs[entry["id"]] = {"kind": "sector", "sector": sector}
 
     return index_list, index_defs
 
@@ -193,32 +179,163 @@ def _load_close_series(ticker: str, start: str, end: str) -> dict[str, float]:
     return series
 
 
-def _load_sector_returns(
-    conn,
-    view: str,
-    instrument_col: str,
-    datetime_col: str,
-    ticker: str,
+def _build_target_map(
+    instruments: list[str],
     start: str,
     end: str,
-) -> dict[str, float]:
-    date_expr = f"CAST({_quote_ident(datetime_col)} AS DATE)"
-    query = (
-        f"SELECT {date_expr} AS date, sector_ret "
-        f"FROM {_quote_ident(view)} "
-        f"WHERE {_quote_ident(instrument_col)} = ? "
-        f"AND {date_expr} BETWEEN ? AND ? "
-        f"ORDER BY {date_expr}"
+    horizon_days: int,
+    target: str,
+    calendar_dates: list[str],
+    calendar_index: dict[str, int],
+) -> tuple[dict[str, dict[str, float]], list[str]]:
+    if horizon_days < 0:
+        raise ValueError("horizon_days must be non-negative")
+
+    try:
+        from qlib.data import D
+    except ImportError as exc:
+        raise RuntimeError("qlib is not available") from exc
+
+    calendar = slice_calendar(calendar_dates, calendar_index, start, end)
+    if not calendar:
+        return {}, []
+    if horizon_days > 0:
+        valid_dates = calendar[: -horizon_days]
+    else:
+        valid_dates = calendar
+
+    data = D.features(
+        instruments=instruments,
+        fields=["$open", "$close"],
+        start_time=start,
+        end_time=end,
+        freq="day",
     )
-    rows = conn.execute(query, [ticker, start, end]).fetchall()
-    series: dict[str, float] = {}
-    for date_value, ret_value in rows:
-        date_text = _normalize_date(date_value)
-        ret = _normalize_value(ret_value)
-        if _is_missing(ret):
-            continue
-        series[date_text] = ret
-    return series
+    if data is None or getattr(data, "empty", True):
+        return {}, valid_dates
+
+    frame = data.reset_index()
+    date_col = "datetime" if "datetime" in frame.columns else "date"
+    instrument_col = "instrument" if "instrument" in frame.columns else "ticker"
+    open_col = "$open" if "$open" in frame.columns else "open"
+    close_col = "$close" if "$close" in frame.columns else "close"
+    if date_col not in frame.columns or instrument_col not in frame.columns:
+        return {}, valid_dates
+    if open_col not in frame.columns or close_col not in frame.columns:
+        return {}, valid_dates
+
+    open_map: dict[str, dict[str, float]] = {}
+    close_map: dict[str, dict[str, float]] = {}
+    for row in frame.itertuples(index=False):
+        record = dict(zip(frame.columns, row))
+        instrument = str(record[instrument_col]).lower()
+        date_value = _normalize_date(record[date_col])
+        open_value = _normalize_value(record[open_col])
+        close_value = _normalize_value(record[close_col])
+        if not _is_missing(open_value):
+            open_map.setdefault(instrument, {})[date_value] = float(open_value)
+        if not _is_missing(close_value):
+            close_map.setdefault(instrument, {})[date_value] = float(close_value)
+
+    target_map: dict[str, dict[str, float]] = {}
+    calendar_lookup = {date: idx for idx, date in enumerate(calendar)}
+    for instrument in instruments:
+        open_series = open_map.get(instrument, {})
+        close_series = close_map.get(instrument, {})
+        for day in valid_dates:
+            day_idx = calendar_lookup.get(day)
+            if day_idx is None:
+                continue
+            future_idx = day_idx + horizon_days
+            if future_idx >= len(calendar):
+                continue
+            future_day = calendar[future_idx]
+            close_future = close_series.get(future_day)
+            open_future = open_series.get(future_day)
+
+            if target == "ret_cc":
+                if close_future is None:
+                    continue
+                close_now = close_series.get(day)
+                if close_now in (None, 0):
+                    continue
+                value = (close_future / close_now) - 1.0
+            elif target == "close_open":
+                if close_future is None:
+                    continue
+                open_now = open_series.get(day)
+                if open_now in (None, 0):
+                    continue
+                value = (close_future / open_now) - 1.0
+            elif target == "open_open":
+                if open_future is None:
+                    continue
+                open_now = open_series.get(day)
+                if open_now in (None, 0):
+                    continue
+                value = (open_future / open_now) - 1.0
+            else:
+                raise ValueError(f"Unknown target: {target}")
+
+            target_map.setdefault(day, {})[instrument] = value
+
+    return target_map, valid_dates
+
+
+def _resolve_universe(state: Starlette, universe: object) -> list[str]:
+    if isinstance(universe, list):
+        return [str(item).strip().lower() for item in universe if str(item).strip()]
+    if isinstance(universe, str):
+        universe_key = universe.strip().lower()
+        if universe_key in {"all", "equity", "instruments"}:
+            return [item["ticker"] for item in state.instruments_all]
+        if universe_key in {"indexes", "index"}:
+            return [item["ticker"] for item in state.instruments_indexes]
+        return [name.strip().lower() for name in universe_key.split(",") if name.strip()]
+    raise ValueError("universe must be a string or list")
+
+
+def _rolling_metrics(
+    dates: list[str], values: list[Optional[float]], window: int
+) -> dict[str, list[dict[str, object]]]:
+    window = max(int(window), 1)
+    rolling_mean: list[dict[str, object]] = []
+    rolling_std: list[dict[str, object]] = []
+    rolling_ir: list[dict[str, object]] = []
+    rolling_t: list[dict[str, object]] = []
+
+    window_values: list[Optional[float]] = []
+    for idx, value in enumerate(values):
+        window_values.append(value)
+        if len(window_values) > window:
+            window_values.pop(0)
+
+        valid = [item for item in window_values if item is not None]
+        mean = None
+        std = None
+        ir = None
+        t_stat = None
+        if valid:
+            mean = sum(valid) / len(valid)
+            if len(valid) > 1:
+                var = sum((item - mean) ** 2 for item in valid) / (len(valid) - 1)
+                std = math.sqrt(var)
+                if std:
+                    ir = mean / std
+                    t_stat = mean / (std / math.sqrt(len(valid)))
+
+        day = dates[idx]
+        rolling_mean.append({"date": day, "value": mean})
+        rolling_std.append({"date": day, "value": std})
+        rolling_ir.append({"date": day, "value": ir})
+        rolling_t.append({"date": day, "value": t_stat})
+
+    return {
+        "ic_mean": rolling_mean,
+        "ic_std": rolling_std,
+        "ic_ir": rolling_ir,
+        "t_stat": rolling_t,
+    }
 
 
 def _error(message: str, status_code: int = 400, details: Optional[object] = None) -> JSONResponse:
@@ -242,6 +359,70 @@ def _parse_optional_date(value: Optional[str]) -> Optional[date]:
     if not value:
         return None
     return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def _pearson_corr(values_x: list[float], values_y: list[float]) -> Optional[float]:
+    n = len(values_x)
+    if n < 2 or n != len(values_y):
+        return None
+    mean_x = sum(values_x) / n
+    mean_y = sum(values_y) / n
+    sum_xy = 0.0
+    sum_xx = 0.0
+    sum_yy = 0.0
+    for x, y in zip(values_x, values_y):
+        dx = x - mean_x
+        dy = y - mean_y
+        sum_xy += dx * dy
+        sum_xx += dx * dx
+        sum_yy += dy * dy
+    if sum_xx <= 0 or sum_yy <= 0:
+        return None
+    return sum_xy / math.sqrt(sum_xx * sum_yy)
+
+
+def _rank_values(values: list[float]) -> list[float]:
+    n = len(values)
+    indexed = sorted(enumerate(values), key=lambda item: item[1])
+    ranks = [0.0] * n
+    idx = 0
+    while idx < n:
+        start = idx
+        value = indexed[idx][1]
+        while idx + 1 < n and indexed[idx + 1][1] == value:
+            idx += 1
+        end = idx
+        avg_rank = (start + end) / 2.0 + 1.0
+        for pos in range(start, end + 1):
+            ranks[indexed[pos][0]] = avg_rank
+        idx += 1
+    return ranks
+
+
+def _spearman_corr(values_x: list[float], values_y: list[float]) -> Optional[float]:
+    if len(values_x) < 2:
+        return None
+    ranked_x = _rank_values(values_x)
+    ranked_y = _rank_values(values_y)
+    return _pearson_corr(ranked_x, ranked_y)
+
+
+def _decile_means(pairs: list[tuple[float, float]]) -> Optional[list[Optional[float]]]:
+    n = len(pairs)
+    if n < 10:
+        return None
+    ordered = sorted(pairs, key=lambda item: item[0])
+    buckets: list[list[float]] = [[] for _ in range(10)]
+    for idx, (_, target) in enumerate(ordered):
+        decile = min(9, int(idx * 10 / n))
+        buckets[decile].append(target)
+    means: list[Optional[float]] = []
+    for bucket in buckets:
+        if not bucket:
+            means.append(None)
+        else:
+            means.append(sum(bucket) / len(bucket))
+    return means
 
 
 def _enforce_instrument_window(
@@ -300,6 +481,10 @@ def _quote_ident(name: str) -> str:
 
 async def homepage(request: Request) -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+async def feature_power_page(request: Request) -> FileResponse:
+    return FileResponse(STATIC_DIR / "feature_power.html")
 
 
 async def health(request: Request) -> JSONResponse:
@@ -649,8 +834,6 @@ async def instrument_meta(request: Request) -> JSONResponse:
 
     sector = meta.get("sector", "")
     payload = {"ticker": ticker, "sector": sector, "industry": meta.get("industry", "")}
-    if sector:
-        payload["sector_index"] = f"sector:{sector}"
     return JSONResponse(payload)
 
 
@@ -685,23 +868,6 @@ async def index_series(request: Request) -> JSONResponse:
     if missing_names:
         return _error("Unknown index names", details={"missing": missing_names})
 
-    try:
-        instrument_closes = _load_close_series(instrument, start, end)
-    except RuntimeError as exc:
-        return _error(str(exc), status_code=500)
-
-    base_date = _first_available_date(instrument_closes, calendar_requested)
-    if not base_date:
-        return _error("Instrument base price not found")
-
-    base_close = instrument_closes.get(base_date)
-    if base_close is None:
-        return _error("Instrument base price not found")
-
-    calendar_full = slice_calendar(
-        state.calendar_dates, state.calendar_index, base_date, end
-    )
-
     index_payload: dict[str, list[dict[str, object]]] = {}
     for name in names:
         definition = state.index_defs[name]
@@ -711,67 +877,13 @@ async def index_series(request: Request) -> JSONResponse:
         if kind == "market":
             index_ticker = definition["ticker"]
             try:
-                index_closes = _load_close_series(index_ticker, base_date, end)
+                index_closes = _load_close_series(index_ticker, start, end)
             except RuntimeError as exc:
                 return _error(str(exc), status_code=500)
-            index_base_date = base_date if index_closes.get(base_date) is not None else None
-            if index_base_date is None:
-                index_base_date = _first_available_date(index_closes, calendar_full)
-            index_base = index_closes.get(index_base_date) if index_base_date else None
 
             for day in calendar_requested:
-                if index_base is None or (index_base_date and day < index_base_date):
-                    series.append({"date": day, "value": None})
-                    continue
                 close = index_closes.get(day)
-                if close is None or index_base in (None, 0):
-                    value = None
-                else:
-                    value = base_close * (close / index_base)
-                series.append({"date": day, "value": value})
-
-        elif kind == "sector":
-            sector = definition["sector"]
-            representative = state.sector_representative.get(sector)
-            if not representative:
-                return _error("Sector index representative missing", details={"sector": sector})
-
-            view = "features_sector"
-            schema = state.duckdb.view_schema.get(view, {})
-            if "sector_ret" not in schema:
-                return _error("sector_ret column missing in features_sector view")
-
-            instrument_col = state.duckdb.instrument_columns.get(view)
-            datetime_col = state.duckdb.datetime_columns.get(view)
-            if not instrument_col or not datetime_col:
-                return _error("features_sector view missing instrument/datetime columns")
-
-            returns = _load_sector_returns(
-                state.duckdb.conn,
-                view,
-                instrument_col,
-                datetime_col,
-                representative,
-                base_date,
-                end,
-            )
-            values_by_date: dict[str, Optional[float]] = {}
-            factor = 1.0
-            for day in calendar_full:
-                if day == base_date:
-                    values_by_date[day] = factor
-                    continue
-                ret = returns.get(day)
-                if ret is None:
-                    values_by_date[day] = None
-                    continue
-                factor *= 1 + ret
-                values_by_date[day] = factor
-
-            for day in calendar_requested:
-                factor_value = values_by_date.get(day)
-                value = base_close * factor_value if factor_value is not None else None
-                series.append({"date": day, "value": value})
+                series.append({"date": day, "value": close})
 
         else:
             return _error("Unknown index kind", details={"name": name})
@@ -783,8 +895,555 @@ async def index_series(request: Request) -> JSONResponse:
             "instrument": instrument,
             "from": start,
             "to": end,
-            "base_date": base_date,
             "indexes": index_payload,
+        }
+    )
+
+
+async def feature_power(request: Request) -> JSONResponse:
+    state = request.app.state
+    try:
+        payload = await request.json()
+    except ValueError:
+        return _error("Invalid JSON payload")
+
+    universe = payload.get("universe", "all")
+    target = payload.get("target", "ret_cc")
+    method = (payload.get("method") or "spearman").lower()
+    horizon_days = payload.get("horizon_days", 1)
+    features = payload.get("features", [])
+
+    if method not in {"spearman", "pearson"}:
+        return _error("method must be spearman or pearson")
+    try:
+        horizon_days = int(horizon_days)
+    except (TypeError, ValueError):
+        return _error("horizon_days must be an integer")
+    if horizon_days < 0:
+        return _error("horizon_days must be non-negative")
+
+    try:
+        date_from = _parse_iso_date(payload.get("date_from"), "date_from")
+        date_to = _parse_iso_date(payload.get("date_to"), "date_to")
+    except ValueError as exc:
+        return _error(str(exc))
+
+    if not isinstance(features, list) or not features:
+        return _error("features must be a non-empty list")
+
+    universe_list: list[str] = []
+    if isinstance(universe, list):
+        universe_list = [str(item).strip().lower() for item in universe if str(item).strip()]
+    elif isinstance(universe, str):
+        universe_key = universe.strip().lower()
+        if universe_key in {"all", "equity", "instruments"}:
+            universe_list = [item["ticker"] for item in state.instruments_all]
+        elif universe_key in {"indexes", "index"}:
+            universe_list = [item["ticker"] for item in state.instruments_indexes]
+        else:
+            universe_list = [
+                name.strip().lower()
+                for name in universe_key.split(",")
+                if name.strip()
+            ]
+    else:
+        return _error("universe must be a string or list")
+
+    if not universe_list:
+        return _error("universe resolved to an empty list")
+
+    features = [str(name).strip() for name in features if str(name).strip()]
+    if not features:
+        return _error("features must be a non-empty list")
+
+    missing_features = [
+        name for name in features if name not in state.duckdb.feature_sources
+    ]
+    if missing_features:
+        return _error("Unknown feature names", details={"missing": missing_features})
+
+    try:
+        target_map, valid_dates = _build_target_map(
+            universe_list,
+            date_from,
+            date_to,
+            horizon_days,
+            target,
+            state.calendar_dates,
+            state.calendar_index,
+        )
+    except RuntimeError as exc:
+        return _error(str(exc), status_code=500)
+    except ValueError as exc:
+        return _error(str(exc))
+
+    results: list[dict] = []
+    for feature_name in features:
+        view = state.duckdb.feature_sources[feature_name]
+        instrument_col = state.duckdb.instrument_columns.get(view)
+        datetime_col = state.duckdb.datetime_columns.get(view)
+        if not instrument_col or not datetime_col:
+            return _error(
+                "DuckDB view missing instrument/datetime columns",
+                status_code=500,
+                details={"view": view},
+            )
+
+        date_expr = f"CAST({_quote_ident(datetime_col)} AS DATE)"
+        placeholders = ", ".join(["?"] * len(universe_list))
+        query = (
+            f"SELECT {_quote_ident(instrument_col)} AS instrument, "
+            f"{date_expr} AS date, {_quote_ident(feature_name)} AS value "
+            f"FROM {_quote_ident(view)} "
+            f"WHERE {_quote_ident(instrument_col)} IN ({placeholders}) "
+            f"AND {date_expr} BETWEEN ? AND ? "
+            f"ORDER BY {date_expr}"
+        )
+        rows = state.duckdb.conn.execute(
+            query, universe_list + [date_from, date_to]
+        ).fetchall()
+
+        date_pairs: dict[str, list[tuple[float, float]]] = {}
+        n_obs = 0
+        for instrument, date_value, value in rows:
+            date_text = _normalize_date(date_value)
+            targets = target_map.get(date_text)
+            if not targets:
+                continue
+            target_value = targets.get(str(instrument).lower())
+            if target_value is None:
+                continue
+            normalized = _normalize_value(value)
+            if _is_missing(normalized):
+                continue
+            date_pairs.setdefault(date_text, []).append(
+                (float(normalized), float(target_value))
+            )
+
+        ic_ts: list[dict[str, object]] = []
+        ic_values: list[float] = []
+        decile_sum = [0.0] * 10
+        decile_count = [0] * 10
+
+        for day in valid_dates:
+            pairs = date_pairs.get(day)
+            if not pairs:
+                continue
+            values_x = [pair[0] for pair in pairs]
+            values_y = [pair[1] for pair in pairs]
+            if method == "spearman":
+                ic = _spearman_corr(values_x, values_y)
+            else:
+                ic = _pearson_corr(values_x, values_y)
+            if ic is not None:
+                ic_values.append(ic)
+                ic_ts.append({"date": day, "ic": ic})
+
+            deciles = _decile_means(pairs)
+            if deciles:
+                for idx, mean in enumerate(deciles):
+                    if mean is None:
+                        continue
+                    decile_sum[idx] += mean
+                    decile_count[idx] += 1
+
+            n_obs += len(pairs)
+
+        ic_mean = sum(ic_values) / len(ic_values) if ic_values else None
+        ic_std = None
+        ic_ir = None
+        t_stat = None
+        if ic_values and len(ic_values) > 1:
+            mean = ic_mean or 0.0
+            var = sum((value - mean) ** 2 for value in ic_values) / (len(ic_values) - 1)
+            ic_std = math.sqrt(var)
+            if ic_std:
+                ic_ir = mean / ic_std
+                t_stat = mean / (ic_std / math.sqrt(len(ic_values)))
+
+        decile_curve: list[Optional[float]] = []
+        for idx in range(10):
+            if decile_count[idx]:
+                decile_curve.append(decile_sum[idx] / decile_count[idx])
+            else:
+                decile_curve.append(None)
+
+        decile_spread = None
+        if decile_curve[0] is not None and decile_curve[-1] is not None:
+            decile_spread = decile_curve[-1] - decile_curve[0]
+
+        results.append(
+            {
+                "feature": feature_name,
+                "n_obs": n_obs,
+                "ic_mean": ic_mean,
+                "ic_std": ic_std,
+                "ic_ir": ic_ir,
+                "t_stat": t_stat,
+                "decile_spread": decile_spread,
+                "decile_curve": decile_curve,
+                "ic_ts": ic_ts,
+            }
+        )
+
+    return JSONResponse(
+        {
+            "count": len(results),
+            "params": {
+                "universe": universe,
+                "target": target,
+                "horizon_days": horizon_days,
+                "date_from": date_from,
+                "date_to": date_to,
+                "method": method,
+                "neutralize": payload.get("neutralize"),
+                "regimes": payload.get("regimes"),
+            },
+            "results": results,
+        }
+    )
+
+
+async def feature_power_summary(request: Request) -> JSONResponse:
+    state = request.app.state
+    try:
+        payload = await request.json()
+    except ValueError:
+        return _error("Invalid JSON payload")
+
+    universe = payload.get("universe", "all")
+    target = payload.get("target", "ret_cc")
+    method = (payload.get("method") or "spearman").lower()
+    horizon_days = payload.get("horizon_days", 1)
+    features = payload.get("features")
+
+    if method not in {"spearman", "pearson"}:
+        return _error("method must be spearman or pearson")
+    try:
+        horizon_days = int(horizon_days)
+    except (TypeError, ValueError):
+        return _error("horizon_days must be an integer")
+    if horizon_days < 0:
+        return _error("horizon_days must be non-negative")
+
+    try:
+        date_from = _parse_iso_date(payload.get("date_from"), "date_from")
+        date_to = _parse_iso_date(payload.get("date_to"), "date_to")
+    except ValueError as exc:
+        return _error(str(exc))
+
+    try:
+        universe_list = _resolve_universe(state, universe)
+    except ValueError as exc:
+        return _error(str(exc))
+    if not universe_list:
+        return _error("universe resolved to an empty list")
+
+    if features is None:
+        features = sorted(state.duckdb.feature_sources)
+    elif not isinstance(features, list):
+        return _error("features must be a list")
+    else:
+        features = [str(name).strip() for name in features if str(name).strip()]
+
+    if not features:
+        return _error("features must be a non-empty list")
+
+    missing_features = [
+        name for name in features if name not in state.duckdb.feature_sources
+    ]
+    if missing_features:
+        return _error("Unknown feature names", details={"missing": missing_features})
+
+    try:
+        target_map, valid_dates = _build_target_map(
+            universe_list,
+            date_from,
+            date_to,
+            horizon_days,
+            target,
+            state.calendar_dates,
+            state.calendar_index,
+        )
+    except RuntimeError as exc:
+        return _error(str(exc), status_code=500)
+    except ValueError as exc:
+        return _error(str(exc))
+
+    results: list[dict] = []
+    for feature_name in features:
+        view = state.duckdb.feature_sources[feature_name]
+        instrument_col = state.duckdb.instrument_columns.get(view)
+        datetime_col = state.duckdb.datetime_columns.get(view)
+        if not instrument_col or not datetime_col:
+            return _error(
+                "DuckDB view missing instrument/datetime columns",
+                status_code=500,
+                details={"view": view},
+            )
+
+        date_expr = f"CAST({_quote_ident(datetime_col)} AS DATE)"
+        placeholders = ", ".join(["?"] * len(universe_list))
+        query = (
+            f"SELECT {_quote_ident(instrument_col)} AS instrument, "
+            f"{date_expr} AS date, {_quote_ident(feature_name)} AS value "
+            f"FROM {_quote_ident(view)} "
+            f"WHERE {_quote_ident(instrument_col)} IN ({placeholders}) "
+            f"AND {date_expr} BETWEEN ? AND ? "
+            f"ORDER BY {date_expr}"
+        )
+        rows = state.duckdb.conn.execute(
+            query, universe_list + [date_from, date_to]
+        ).fetchall()
+
+        date_pairs: dict[str, list[tuple[float, float]]] = {}
+        n_obs = 0
+        for instrument, date_value, value in rows:
+            date_text = _normalize_date(date_value)
+            targets = target_map.get(date_text)
+            if not targets:
+                continue
+            target_value = targets.get(str(instrument).lower())
+            if target_value is None:
+                continue
+            normalized = _normalize_value(value)
+            if _is_missing(normalized):
+                continue
+            date_pairs.setdefault(date_text, []).append(
+                (float(normalized), float(target_value))
+            )
+
+        ic_values: list[float] = []
+        decile_sum = [0.0] * 10
+        decile_count = [0] * 10
+
+        for day in valid_dates:
+            pairs = date_pairs.get(day)
+            if not pairs:
+                continue
+            values_x = [pair[0] for pair in pairs]
+            values_y = [pair[1] for pair in pairs]
+            if method == "spearman":
+                ic = _spearman_corr(values_x, values_y)
+            else:
+                ic = _pearson_corr(values_x, values_y)
+            if ic is not None:
+                ic_values.append(ic)
+
+            deciles = _decile_means(pairs)
+            if deciles:
+                for idx, mean in enumerate(deciles):
+                    if mean is None:
+                        continue
+                    decile_sum[idx] += mean
+                    decile_count[idx] += 1
+
+            n_obs += len(pairs)
+
+        ic_mean = sum(ic_values) / len(ic_values) if ic_values else None
+        ic_std = None
+        ic_ir = None
+        t_stat = None
+        if ic_values and len(ic_values) > 1:
+            mean = ic_mean or 0.0
+            var = sum((value - mean) ** 2 for value in ic_values) / (len(ic_values) - 1)
+            ic_std = math.sqrt(var)
+            if ic_std:
+                ic_ir = mean / ic_std
+                t_stat = mean / (ic_std / math.sqrt(len(ic_values)))
+
+        decile_spread = None
+        if decile_count[0] and decile_count[-1]:
+            low = decile_sum[0] / decile_count[0]
+            high = decile_sum[-1] / decile_count[-1]
+            decile_spread = high - low
+
+        results.append(
+            {
+                "feature": feature_name,
+                "n_obs": n_obs,
+                "ic_mean": ic_mean,
+                "ic_std": ic_std,
+                "ic_ir": ic_ir,
+                "t_stat": t_stat,
+                "decile_spread": decile_spread,
+            }
+        )
+
+    return JSONResponse(
+        {
+            "count": len(results),
+            "params": {
+                "universe": universe,
+                "target": target,
+                "horizon_days": horizon_days,
+                "date_from": date_from,
+                "date_to": date_to,
+                "method": method,
+                "neutralize": payload.get("neutralize"),
+                "regimes": payload.get("regimes"),
+            },
+            "results": results,
+        }
+    )
+
+
+async def feature_power_detail(request: Request) -> JSONResponse:
+    state = request.app.state
+    try:
+        payload = await request.json()
+    except ValueError:
+        return _error("Invalid JSON payload")
+
+    universe = payload.get("universe", "all")
+    target = payload.get("target", "ret_cc")
+    method = (payload.get("method") or "spearman").lower()
+    horizon_days = payload.get("horizon_days", 1)
+    feature_name = payload.get("feature")
+    rolling_window = payload.get("rolling_window", 20)
+
+    if method not in {"spearman", "pearson"}:
+        return _error("method must be spearman or pearson")
+    try:
+        horizon_days = int(horizon_days)
+    except (TypeError, ValueError):
+        return _error("horizon_days must be an integer")
+    if horizon_days < 0:
+        return _error("horizon_days must be non-negative")
+    try:
+        rolling_window = int(rolling_window)
+    except (TypeError, ValueError):
+        return _error("rolling_window must be an integer")
+    if rolling_window <= 0:
+        return _error("rolling_window must be a positive integer")
+
+    if not isinstance(feature_name, str) or not feature_name.strip():
+        return _error("feature is required")
+    feature_name = feature_name.strip()
+
+    try:
+        date_from = _parse_iso_date(payload.get("date_from"), "date_from")
+        date_to = _parse_iso_date(payload.get("date_to"), "date_to")
+    except ValueError as exc:
+        return _error(str(exc))
+
+    try:
+        universe_list = _resolve_universe(state, universe)
+    except ValueError as exc:
+        return _error(str(exc))
+    if not universe_list:
+        return _error("universe resolved to an empty list")
+
+    if feature_name not in state.duckdb.feature_sources:
+        return _error("Unknown feature name", details={"missing": [feature_name]})
+
+    try:
+        target_map, valid_dates = _build_target_map(
+            universe_list,
+            date_from,
+            date_to,
+            horizon_days,
+            target,
+            state.calendar_dates,
+            state.calendar_index,
+        )
+    except RuntimeError as exc:
+        return _error(str(exc), status_code=500)
+    except ValueError as exc:
+        return _error(str(exc))
+
+    view = state.duckdb.feature_sources[feature_name]
+    instrument_col = state.duckdb.instrument_columns.get(view)
+    datetime_col = state.duckdb.datetime_columns.get(view)
+    if not instrument_col or not datetime_col:
+        return _error(
+            "DuckDB view missing instrument/datetime columns",
+            status_code=500,
+            details={"view": view},
+        )
+
+    date_expr = f"CAST({_quote_ident(datetime_col)} AS DATE)"
+    placeholders = ", ".join(["?"] * len(universe_list))
+    query = (
+        f"SELECT {_quote_ident(instrument_col)} AS instrument, "
+        f"{date_expr} AS date, {_quote_ident(feature_name)} AS value "
+        f"FROM {_quote_ident(view)} "
+        f"WHERE {_quote_ident(instrument_col)} IN ({placeholders}) "
+        f"AND {date_expr} BETWEEN ? AND ? "
+        f"ORDER BY {date_expr}"
+    )
+    rows = state.duckdb.conn.execute(
+        query, universe_list + [date_from, date_to]
+    ).fetchall()
+
+    date_pairs: dict[str, list[tuple[float, float]]] = {}
+    for instrument, date_value, value in rows:
+        date_text = _normalize_date(date_value)
+        targets = target_map.get(date_text)
+        if not targets:
+            continue
+        target_value = targets.get(str(instrument).lower())
+        if target_value is None:
+            continue
+        normalized = _normalize_value(value)
+        if _is_missing(normalized):
+            continue
+        date_pairs.setdefault(date_text, []).append(
+            (float(normalized), float(target_value))
+        )
+
+    daily_ic: list[dict[str, object]] = []
+    daily_decile_spread: list[dict[str, object]] = []
+    daily_n_obs: list[dict[str, object]] = []
+    ic_values: list[Optional[float]] = []
+
+    for day in valid_dates:
+        pairs = date_pairs.get(day)
+        if not pairs:
+            daily_ic.append({"date": day, "value": None})
+            daily_decile_spread.append({"date": day, "value": None})
+            daily_n_obs.append({"date": day, "value": 0})
+            ic_values.append(None)
+            continue
+
+        values_x = [pair[0] for pair in pairs]
+        values_y = [pair[1] for pair in pairs]
+        if method == "spearman":
+            ic = _spearman_corr(values_x, values_y)
+        else:
+            ic = _pearson_corr(values_x, values_y)
+        daily_ic.append({"date": day, "value": ic})
+        ic_values.append(ic)
+
+        deciles = _decile_means(pairs)
+        spread = None
+        if deciles and deciles[0] is not None and deciles[-1] is not None:
+            spread = deciles[-1] - deciles[0]
+        daily_decile_spread.append({"date": day, "value": spread})
+        daily_n_obs.append({"date": day, "value": len(pairs)})
+
+    rolling = _rolling_metrics(valid_dates, ic_values, rolling_window)
+
+    return JSONResponse(
+        {
+            "feature": feature_name,
+            "params": {
+                "universe": universe,
+                "target": target,
+                "horizon_days": horizon_days,
+                "date_from": date_from,
+                "date_to": date_to,
+                "method": method,
+                "rolling_window": rolling_window,
+                "neutralize": payload.get("neutralize"),
+                "regimes": payload.get("regimes"),
+            },
+            "daily": {
+                "ic": daily_ic,
+                "decile_spread": daily_decile_spread,
+                "n_obs": daily_n_obs,
+            },
+            "rolling": rolling,
         }
     )
 
@@ -794,6 +1453,7 @@ def create_app() -> Starlette:
         debug=False,
         routes=[
             Route("/", homepage),
+            Route("/feature-power", feature_power_page),
             Route("/health", health),
             Route("/tickers", tickers),
             Route("/bars", bars),
@@ -802,6 +1462,9 @@ def create_app() -> Starlette:
             Route("/indexes", indexes),
             Route("/instrument-meta", instrument_meta),
             Route("/index-series", index_series),
+            Route("/feature_power", feature_power, methods=["POST"]),
+            Route("/feature_power_summary", feature_power_summary, methods=["POST"]),
+            Route("/feature_power_detail", feature_power_detail, methods=["POST"]),
         ],
     )
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -810,7 +1473,6 @@ def create_app() -> Starlette:
     app.state.index_list = []
     app.state.index_defs = {}
     app.state.instrument_meta = {}
-    app.state.sector_representative = {}
 
     @app.on_event("startup")
     async def startup() -> None:
@@ -856,9 +1518,7 @@ def create_app() -> Starlette:
         app.state.sector_to_tickers = sector_to_tickers
         app.state.sector_bounds = sector_bounds
         app.state.sector_representative = sector_representative
-        index_list, index_defs = _build_index_definitions(
-            app.state.instruments_indexes, sector_bounds
-        )
+        index_list, index_defs = _build_index_definitions(app.state.instruments_indexes)
         app.state.index_list = index_list
         app.state.index_defs = index_defs
         app.state.calendar_dates = calendar_dates
